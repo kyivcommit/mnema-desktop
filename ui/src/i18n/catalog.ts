@@ -76,7 +76,7 @@ export type Key = 'settings_title' | 'indexed_documents'
  
  
  
-  | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
+ 
   | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
   | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
@@ -92,8 +92,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
   | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
-  | 'settings_folders_removing' | 'settings_folders_remove_blocked'
-  | 'settings_folders_remove_question_withdrawn'
+  | 'settings_folders_removing'
+ 
   | 'settings_folders_added_note' | 'settings_folders_unconfirmed'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
@@ -106,8 +106,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_masks_confirm_add_named' | 'settings_masks_confirm_remove_named'
   | 'settings_masks_confirm_cancel_named'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
-  | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
-  | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
+  | 'settings_masks_refused_case_note'
+  | 'settings_masks_already_stored'
   | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_probe_running' | 'indexing_model_adoption_running' | 'indexing_summary_fallback'
@@ -611,12 +611,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // дозволяє.
     // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
     // «Правила вже не було» — не помилка, а факт про екран, який застарів.
-    settings_folders_rule_already_gone: 'Такого правила вже не було. Список перечитано.',
     // PR 8a, Task 8. Числа в питанні заморожені на мить натиску (`Pending`), а
     // сканування — це саме та подія, після якої вони брешуть. Мовчки прибрати
     // питання не можна: натиск людини зник би без сліду. Тому питання знімають
     // і кажуть, про яку теку воно було.
-    settings_folders_question_withdrawn: 'Питання про «{path}» знято: індексацію закінчено, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // ── PR 8a, Task 6: що коштує виключення, сказане ДО збереження ──────────
     //
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
@@ -715,17 +713,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // кнопок цього рядка, а не поруч із ними: натиснути тут більше нема на що,
     // і кнопка, яка нічого не робить, читається як кнопка, яку не почули.
     settings_folders_removing: 'Видаляємо…',
-    // Одне речення на весь список, поки триває робота: бекенд відмовляє
-    // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
-    // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
-    settings_folders_remove_blocked: 'Кнопка «Видалити» запрацює після зупинки сканування.',
-    // 🔴 Рев'ю раунду 1 (m3). Власний ключ, а не `settings_folders_question_withdrawn`.
-    // Речення те саме за змістом, але останнє підрядне називає, ЩО перечитано:
-    // питання про підтеку живе в панелі, і панель справді перечитують; питання
-    // про видалення живе під списком, і рядок, до якого воно належить, у
-    // звичайному випадку згорнутий — жодної панелі на екрані немає й жодної не
-    // читали. Спільний рядок казав людині про панель, якої вона не бачить.
-    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: індексацію закінчено, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
@@ -783,7 +770,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_store: 'Маску {mask} не збережено. Ось що відповів індекс:',
     settings_masks_refused_remove: 'Маску {mask} не видалено. Ось що відповів індекс:',
     settings_masks_refused_case_note: 'У цій відповіді маска може бути записана іншим регістром, ніж ви ввели: маски порівнюються без урахування регістру.',
-    settings_masks_already_gone: 'Такої маски вже не було. Список перечитано.',
     // 🔴 Близнюк рядка вище, і той самий клас: «нічого не додано» — це окреме
     // речення, а не мовчання. Сховище розрізняє рядки побайтово, а прохід
     // порівнює маски згорнуто, тож «*.PDF» і «*.pdf» — це два можливі рядки й
@@ -791,10 +777,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
     // знайшла б його.
     settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
-    // 🔴 Власний ключ, а не `settings_folders_question_withdrawn`: там панель
-    // ПЕРЕЧИТАНО, а тут застарів РОЗРАХУНОК — питання про маску несе число,
-    // яке дав `mask_preview` до того, як індексація змінила набір документів.
-    settings_masks_question_withdrawn: 'Питання про маску «{mask}» знято: індексацію закінчено, і розрахунок застарів. Натисніть ще раз, якщо це досі потрібно.',
     // Task 7 — the live reading phase names the folder it is on, one-based the
     // way `scan_job.rs`'s own comment states it ("3 of 7" is what a person
     // reads, and `rootIndex` is the folder being read now, not how many are
@@ -1383,8 +1365,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     // The tick's name, not an action: "Index Work, checked" is true in both states.
     settings_subfolder_index_named: 'Index {path}',
-    settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
-    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: indexing has finished and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_include_checking: 'Checking that this is still the same folder…',
     // 🔴 Fix round 6. Used to also claim "and the list has been re-read" —
@@ -1420,8 +1400,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_remove: '{files, plural, one {Remove folder {path} from the index? # file from this folder will disappear from search.} other {Remove folder {path} from the index? # files from this folder will disappear from search.}}',
     settings_folders_confirm_remove_named: 'Confirm removing {path}',
     settings_folders_removing: 'Removing…',
-    settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
-    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
     settings_folders_added_note: 'Folder added. Untick what should stay out, set masks, then press “Apply changes” at the bottom.',
     settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then apply changes.',
     settings_masks_heading: 'File masks',
@@ -1449,9 +1427,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_store: 'The mask {mask} was not stored. This is what the index answered:',
     settings_masks_refused_remove: 'The mask {mask} was not removed. This is what the index answered:',
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
-    settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
-    settings_masks_question_withdrawn: 'The question about mask “{mask}” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
     indexing_reading_root: 'Indexing folder {rootIndex} of {rootCount}: {rootPath}',
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',

@@ -69,19 +69,12 @@
   // `remove`: `remove_mask` (inside `answer`) rejected.
   let refused = $state<{ mask: string; of: 'add-check' | 'add-store' | 'remove' } | null>(null);
   let actionError = $state<string | null>(null);
-  let alreadyGone = $state(false);
-  // 🔴 The stored SPELLING, not a flag, and that is the difference between this
-  // and `alreadyGone` above. The store keys masks on their bytes while the walk
+  // 🔴 The stored SPELLING, not a flag. The store keys masks on their bytes while the walk
   // compares them caselessly, so `*.PDF` and `*.pdf` are one rule and two
   // possible rows; the sentence has to name the row that is already there, or a
   // person told "you already have this" looks for what they typed and does not
   // find it in the list above.
   let alreadyStored = $state<string | null>(null);
-  // 🔴 The mask a withdrawn question was about, and the path `Folders.svelte`'s
-  // own `withdrawn` takes: the MASK, never the finished sentence, so a note
-  // standing on screen through a language switch is re-rendered in the language
-  // the person switched to.
-  let withdrawn = $state<string | null>(null);
 
   // Not `$state`: nothing renders from it. The list read is reachable from
   // three places — mount, an add and a remove — so two `list_masks` calls can
@@ -186,19 +179,12 @@
     if (p === null) return;
     ++previews;
     pending = null;
-    withdrawn = p.mask;
   }
 
   function forget() {
     refused = null;
     actionError = null;
-    alreadyGone = false;
     alreadyStored = null;
-    // The note is what the LAST press led to, and it stands until the next one
-    // — `Folders.svelte`'s rule for its own `withdrawn`. Both callers of this
-    // are presses that raise a new question, so the note goes with the answer
-    // it was standing in for.
-    withdrawn = null;
   }
 
   async function askAdd() {
@@ -272,8 +258,7 @@
       } else {
         // `remove_mask` answers whether a row actually went: a second window may
         // have removed the same mask first, and that is a different sentence.
-        alreadyGone = !(await removeMask(p.mask));
-        if (!alreadyGone) unapplied.set(true);
+        if (await removeMask(p.mask)) unapplied.set(true);
       }
     } catch (e) {
       // The check already passed by the time this runs — this is `answer`, not
@@ -305,15 +290,6 @@
   const inputLabel = $derived.by(() => { void $locale; return t('settings_masks_input_label'); });
   const removeLabel = $derived.by(() => { void $locale; return t('settings_masks_remove'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_masks_load_failed'); });
-  const alreadyGoneLabel = $derived.by(() => {
-    void $locale;
-    return alreadyGone ? t('settings_masks_already_gone') : null;
-  });
-  const withdrawnLabel = $derived.by(() => {
-    void $locale;
-    const mask = withdrawn;
-    return mask === null ? null : t('settings_masks_question_withdrawn', { mask });
-  });
   const alreadyStoredLabel = $derived.by(() => {
     void $locale;
     const stored = alreadyStored;
@@ -535,10 +511,6 @@
           </div>
         </div>
       {/if}
-      <!-- Where the question was, so a person coming back to this panel reads the
-           withdrawal in the place they left the press. -->
-      {#if withdrawnLabel}<p data-testid="mask-question-withdrawn">{withdrawnLabel}</p>{/if}
-      {#if alreadyGoneLabel}<p data-testid="mask-already-gone">{alreadyGoneLabel}</p>{/if}
       {#if alreadyStoredLabel}<p data-testid="mask-already-stored">{alreadyStoredLabel}</p>{/if}
       {#if refusal}
         <p data-testid="mask-refused-heading">{refusal.heading}</p>

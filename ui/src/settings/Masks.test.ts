@@ -551,33 +551,6 @@ test('removing re-reads the list rather than editing the array on screen', async
   expect(screen.getByText('*.tmp')).toBeTruthy();
 });
 
-test('a mask another window removed first says so, and one this window removed does not', async () => {
-  removeMask.mockResolvedValue(false); // the row was already gone
-  await mount(['*.pdf']);
-  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
-
-  listMasks.mockResolvedValue([]);
-  await fireEvent.click((await removeMask_('*.pdf')));
-  await fireEvent.click(confirmRemove('*.pdf'));
-
-  await waitFor(() => expect(screen.getByTestId('mask-already-gone')).toBeTruthy());
-  expect(screen.getByTestId('mask-already-gone').textContent)
-    .toBe('There was no such mask left to remove. The list has been re-read.');
-
-  // The other direction, on a second removal that does remove something: the
-  // note must not stand on a press it does not describe.
-  cleanup();
-  removeMask.mockResolvedValue(true);
-  await mount(['*.tmp']);
-  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
-  listMasks.mockResolvedValue([]);
-  await fireEvent.click((await removeMask_('*.tmp')));
-  await fireEvent.click(confirmRemove('*.tmp'));
-
-  await waitFor(() => expect(screen.queryByText('*.tmp')).toBeNull());
-  expect(screen.queryByTestId('mask-already-gone')).toBeNull();
-});
-
 // Task 11 fix round 1, F5. `<label for="mask-draft-input">` names the field's
 // accessible name; `screen.getByRole('textbox')` (what `type()` above uses)
 // finds the one input on the page regardless of whether the `for` actually
@@ -771,7 +744,7 @@ test('every sentence on the section follows a language switch, the standing ques
 // review that asked for this test suggested reading both off a single screen;
 // probing the running component first showed that state is unreachable, so
 // this covers the same two derived values across two mounts instead.)
-test('the refusal frame and the already-gone note also follow a language switch', async () => {
+test('the refusal frame also follows a language switch', async () => {
   maskPreview.mockRejectedValue(new Error('the index is not open'));
   const { container } = await mount([]);
 
@@ -788,19 +761,6 @@ test('the refusal frame and the already-gone note also follow a language switch'
 
   cleanup();
   setLocale('en');
-  removeMask.mockResolvedValue(false); // the row was already gone
-  const { container: container2 } = await mount(['*.tmp']);
-  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
-
-  await fireEvent.click((await removeMask_('*.tmp')));
-  await fireEvent.click(confirmRemove('*.tmp'));
-  await waitFor(() => expect(screen.getByTestId('mask-already-gone')).toBeTruthy());
-  expect(visibleText(container2)).toContain(t('settings_masks_already_gone'));
-
-  setLocale('uk');
-  await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
-  expect(screen.getByTestId('mask-already-gone').textContent).toBe(t('settings_masks_already_gone'));
-  expect(visibleText(container2)).not.toContain('There was no such mask');
 
   // Task 11 fix round 2, F3. The third `$derived` of the same shape, in its own
   // mount for the reason above: `forget()` clears this one together with the

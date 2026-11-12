@@ -225,9 +225,9 @@ case_ "a question standing when a job ends must be withdrawn, not left over the 
 # `ask(rootId);` occurs eight times in this file.
 case_ "withdrawing a question must also stop the check already on the wire" \
   ui/src/settings/Folders.svelte \
-  "s{      ask\(rootId\);\n      patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);}{      patch(rootId, \{ pending: null, withdrawn: panel.pending.path \});}" \
+  "s{      ask\(rootId\);\n      patch\(rootId, \{ pending: null \}\);\n    \}\n    removeQuestion}{      patch(rootId, \{ pending: null \});\n    \}\n    removeQuestion}" \
   "      const rootId = Number(key);
-      patch(rootId, { pending: null, withdrawn: panel.pending.path });" \
+      patch(rootId, { pending: null });" \
   src/settings/Folders.test.ts 'a check still in flight when a job ends raises no question when its reply lands' runner=vitest
 
 # ── Fix round 2, review I1 ────────────────────────────────────────────────────

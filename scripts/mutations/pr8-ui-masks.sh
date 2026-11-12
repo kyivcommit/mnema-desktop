@@ -92,16 +92,6 @@ case_ "the list after an answer must be a read, never an edit" \
   "    await Promise.resolve();" \
   src/settings/Masks.test.ts 'removing re-reads the list rather than editing the array on screen' runner=vitest
 
-# `remove_mask` answers whether a row actually went, and the two answers are
-# different sentences: a second window may have removed the same mask first.
-# The mutant is the one that always says "removed", which is the direction that
-# tells a person they did something they did not.
-case_ "a row another window removed first must say so" \
-  ui/src/settings/Masks.svelte \
-  "s{        alreadyGone = !\(await removeMask\(p\.mask\)\);}{        await removeMask(p.mask);\n        alreadyGone = false;}" \
-  "        alreadyGone = false;" \
-  src/settings/Masks.test.ts 'a mask another window removed first says so, and one this window removed does not' runner=vitest
-
 # Three call sites read this list — mount, an add and a remove — so two
 # `list_masks` calls can be on the wire at once and the one asked for first is
 # not the one that has to answer first. The same class as `Folders.svelte`'s
@@ -238,14 +228,6 @@ case_ "a store refusal on the add path must not be filed as a check refusal" \
   "      refused = { mask: p.mask, of: p.kind === 'add' ? 'add-check' : 'remove' };" \
   src/settings/Masks.test.ts 'a refusal from the store itself is shown too, and the list is read again' runner=vitest
 
-# F5. `void $locale` dropped from `alreadyGoneLabel`: the string stops
-# following a language switch, the precise failure D130's rule exists for.
-case_ "the already-gone note must follow a language switch" \
-  ui/src/settings/Masks.svelte \
-  "s{    void \\\$locale;\n    return alreadyGone \? t\('settings_masks_already_gone'\) : null;}{    return alreadyGone ? t('settings_masks_already_gone') : null;}" \
-  "    return alreadyGone ? t('settings_masks_already_gone') : null;" \
-  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
-
 # F5, separately from the one above: `void $locale` dropped from `refusal`
 # itself. Two different derived values, the same failure. Delimited `s{}[]`
 # rather than `s{}{}` because the replacement's own unmatched `{` (the arrow
@@ -256,7 +238,7 @@ case_ "the refusal frame must follow a language switch" \
   "s{  const refusal = \\\$derived\.by\(\(\) => \{\n    void \\\$locale;\n    const r = refused;}[  const refusal = \\\$derived.by(() => {\n    const r = refused;]" \
   "  const refusal = \$derived.by(() => {
     const r = refused;" \
-  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
+  src/settings/Masks.test.ts 'the refusal frame also follows a language switch' runner=vitest
 
 # ── Task 11 fix round 2 additions ────────────────────────────────────────────
 #
@@ -301,7 +283,7 @@ case_ "the already-stored sentence must follow a language switch" \
   "s{  const alreadyStoredLabel = \\\$derived\.by\(\(\) => \{\n    void \\\$locale;\n    const stored = alreadyStored;}[  const alreadyStoredLabel = \\\$derived.by(() => {\n    const stored = alreadyStored;]" \
   "  const alreadyStoredLabel = \$derived.by(() => {
     const stored = alreadyStored;" \
-  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
+  src/settings/Masks.test.ts 'the refusal frame also follows a language switch' runner=vitest
 
 # 🔴 F5, the guard the round-1 fixtures did not have. Independent review replaced
 # the whole locator with a version that never looks at the mask — "does this

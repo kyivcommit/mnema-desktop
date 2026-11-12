@@ -119,10 +119,6 @@
   // rules, and it re-reads the panel when it does, so the record is current
   // for as long as nothing else can move it.
   let marks = $state<Record<number, { path: string; some: boolean }>>({});
-  // The PATH the removal question was about when a reading pass withdrew it, or
-  // `null` — the path and not the sentence, for `Panel.withdrawn`'s reason: a
-  // `t()` frozen here would keep its language through a switch.
-  let removeWithdrawn = $state<string | null>(null);
 
   // Whether a job holds the slot, read LIVE from the store rather than captured
   // at the press. `remove_watched_folder` is refused while a job is running
@@ -163,15 +159,6 @@
     loadError: string | null;
     // A rejected exclude/include, shown verbatim (§10).
     actionError: string | null;
-    // `include_subfolder` answered `false`: there was no rule left to remove.
-    // A fact, not an error, and stored as the fact rather than as its sentence
-    // so a language switch re-renders it.
-    alreadyGone: boolean;
-    // PR 8a, Task 8: the path a question was about when a job ending withdrew
-    // it, or `null`. The PATH and not the sentence, for the reason `Pending`
-    // carries numbers and `alreadyGone` is a boolean: a sentence frozen here
-    // would keep its language through a switch.
-    withdrawn: string | null;
     // PR 8a, Task 6: the question now in front of the person for this row, or
     // `null`. At most one per row — a second press replaces the first, so no
     // two questions about the same folder can be on screen disagreeing.
@@ -350,7 +337,7 @@
       [rootId]: {
         rootPath: root.absolutePath,
         tree: null, rules: null, loadError: null, actionError: null,
-        alreadyGone: false, withdrawn: null, pending: null,
+        pending: null,
       },
     };
     void read(rootId, new Set());
@@ -572,12 +559,8 @@
     const generation = ask(rootId);
     rootChanged = false;
     abandonRemoveQuestion(); // a press elsewhere in this list: see the function
-    // `withdrawn` is cleared HERE and in `askInclude`, and deliberately not
-    // also in `exclude`/`include`: every path into those two runs through one
-    // of these two functions first (`exclude`'s zero-cost shortcut included),
-    // so a third site would be a second guard over one fact.
     patch(rootId, {
-      actionError: null, alreadyGone: false, withdrawn: null,
+      actionError: null,
       pending: { kind: 'checking', path, of: 'exclude' },
     });
     let listing: TreeListing;
@@ -639,7 +622,7 @@
     rootChanged = false;
     abandonRemoveQuestion(); // a press elsewhere in this list: see the function
     patch(rootId, {
-      actionError: null, alreadyGone: false, withdrawn: null,
+      actionError: null,
       pending: { kind: 'checking', path, of: 'include' },
     });
     let listing: TreeListing;
@@ -691,7 +674,7 @@
     rootChanged = false;
     abandonRemoveQuestion();
     patch(rootId, {
-      actionError: null, alreadyGone: false, withdrawn: null,
+      actionError: null,
       pending: { kind: 'checking', path, of: 'all' },
     });
     let listing: TreeListing;
@@ -772,7 +755,7 @@
     const panel = panels[rootId];
     if (panel === undefined) return;
     const want = openPathsOf(panel.tree);
-    patch(rootId, { actionError: null, alreadyGone: false });
+    patch(rootId, { actionError: null });
     try {
       // One `set_tick`: a fold-back, if the folder empties, lands in the same
       // transaction (`ticks.rs`).
@@ -792,18 +775,12 @@
     const panel = panels[rootId];
     if (panel === undefined) return;
     const want = openPathsOf(panel.tree);
-    patch(rootId, { actionError: null, alreadyGone: false });
+    patch(rootId, { actionError: null });
     try {
       // One `set_tick`: a push-down is decided and written by the shell in one
       // transaction, never as several calls from here (spec C).
-      const change = await setTick(rootId, path, tick);
+      await setTick(rootId, path, tick);
       unapplied.set(true);
-      // All four sets: a tick that only stores or drops an include changed
-      // something too (PR #102 review).
-      patch(rootId, {
-        alreadyGone: change.added.length === 0 && change.removed.length === 0
-          && change.included.length === 0 && change.unincluded.length === 0,
-      });
     } catch (e) {
       patch(rootId, { actionError: message(e) });
     }
@@ -855,7 +832,6 @@
     // `rootChanged` is a boolean that cannot carry it.
     if (removeQuestion !== null
         && !namesFolder(listing, removeQuestion.rootId, removeQuestion.path)) {
-      removeWithdrawn = removeQuestion.path;
       removeQuestion = null;
     }
     // An expansion belongs to a row, and outlives it for no longer than the
@@ -1018,12 +994,9 @@
       if (panel.pending === null) continue;
       const rootId = Number(key);
       ask(rootId);
-      patch(rootId, { pending: null, withdrawn: panel.pending.path });
+      patch(rootId, { pending: null });
     }
-    if (removeQuestion !== null) {
-      removeWithdrawn = removeQuestion.path;
-      removeQuestion = null;
-    }
+    removeQuestion = null;
   }
 
   function rereadPanels() {
@@ -1150,7 +1123,6 @@
   // folder they are about to remove would be dismissed for looking.
   function abandonRemoveQuestion() {
     removeQuestion = null;
-    removeWithdrawn = null;
   }
 
   // D202: the person's press for the folders added through this window — the
@@ -1245,7 +1217,6 @@
     actionError = null;
     rootChanged = false;
     folderAdded = false; // the note is about the LAST press, and this one is a remove
-    removeWithdrawn = null;
     removeQuestion = { rootId: root.rootId, path: root.absolutePath, files: root.files.length };
   }
 
@@ -1645,14 +1616,6 @@
                 loadError: panel.loadError,
                 failedLabel: t('settings_subfolders_failed'),
                 actionError: panel.actionError,
-                note: panel.alreadyGone ? t('settings_folders_rule_already_gone') : null,
-                // Built here, inside the `void $locale` rebuild, for the reason
-                // `confirmView` is: the words follow a language switch, the
-                // path comes from the panel.
-                withdrawnNote:
-                  panel.withdrawn === null
-                    ? null
-                    : t('settings_folders_question_withdrawn', { path: panel.withdrawn }),
                 confirm: panel.pending === null ? null : confirmView(panel.pending),
               },
       };
@@ -1682,22 +1645,6 @@
   });
   // Task 9, all three under `void $locale` like every other sentence here.
   const removingLabel = $derived.by(() => { void $locale; return t('settings_folders_removing'); });
-  const removeBlockedLabel = $derived.by(() => {
-    void $locale;
-    return scanRunning ? t('settings_folders_remove_blocked') : null;
-  });
-  // 🔴 Fix round 1, m3. Its OWN key, not the panel note's. The two say the same
-  // thing about two different places, and the difference is in the clause that
-  // says what was re-read: the panel note says "this panel was read again", and
-  // this question's row is collapsed in the common case — no panel is on screen and
-  // none was read. The list was. Reusing one string here told a person a panel
-  // they cannot see had been re-read.
-  const removeWithdrawnLabel = $derived.by(() => {
-    void $locale;
-    return removeWithdrawn === null
-      ? null
-      : t('settings_folders_remove_question_withdrawn', { path: removeWithdrawn });
-  });
 </script>
 
 <!-- D202: the settings window is created hidden at start and never unmounted,
@@ -1902,10 +1849,6 @@
           {#if panel.actionError}
             <p data-testid={`folder-subfolder-error-${root.rootId}`}>{panel.actionError}</p>
           {/if}
-          {#if panel.note}<p data-testid={`folder-rule-note-${root.rootId}`}>{panel.note}</p>{/if}
-          {#if panel.withdrawnNote}
-            <p data-testid={`folder-question-withdrawn-${root.rootId}`}>{panel.withdrawnNote}</p>
-          {/if}
           <!-- The question, and nothing stored until it is answered. The heading
                names the path, since it is not drawn inside the row it is about. -->
           {#if panel.confirm}
@@ -1942,17 +1885,6 @@
           {/if}
         {/if}
       {/each}
-      <!-- Task 9, OUTSIDE the load-failure branch, which is the placement fix
-           round 1 (I1) paid for: a re-read that fails takes the whole list off
-           the screen, and a withdrawal notice that went with it would leave a
-           press looking like a press that did nothing. `removeBlocked` only
-           where there is a list whose `−` it explains. -->
-      {#if removeBlockedLabel && loadError === null && roots.length > 0}
-        <p data-testid="folders-remove-blocked">{removeBlockedLabel}</p>
-      {/if}
-      {#if removeWithdrawnLabel}
-        <p data-testid="folders-remove-withdrawn">{removeWithdrawnLabel}</p>
-      {/if}
       {#if folderAdded}
         <p data-testid="folders-added-note">{addedNoteLabel}</p>
       {/if}

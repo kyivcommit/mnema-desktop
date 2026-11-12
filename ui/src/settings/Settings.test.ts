@@ -1150,14 +1150,11 @@ test('a reading pass ending while the section is hidden withdraws the question, 
   // A reading pass has ended: `readSeq` 0 -> 1. This is the fact
   // `Folders.svelte` withdraws on, not the ending itself.
   await emit(endedOnce(1, 1));
-  await waitFor(() => expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy());
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
 
-  expect(visible(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
-    + ' read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   // Withdrawn, not answered — the pair the note stands on.
   expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
@@ -1279,7 +1276,6 @@ test('a reading pass ending while the folders section is hidden withdraws the ma
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   // The state the withdrawal is about is the question STANDING beforehand, so
   // it is asserted rather than assumed.
-  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
@@ -1293,9 +1289,7 @@ test('a reading pass ending while the folders section is hidden withdraws the ma
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   expect(foldersShown()).toBe(true);
   expect(screen.queryByTestId('mask-confirm')).toBeNull();
-  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toBe(
-    'The question about mask “*.txt” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
   // The draft is what the person typed and no scan makes it wrong — this is the
   // half F10 was right about, and withdrawing the question must not take it.
   expect(draft().value).toBe('*.txt');
@@ -1311,7 +1305,6 @@ test('a reading pass ending while the folders section is hidden withdraws the ma
   await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
   await waitFor(() => expect(maskPreview).toHaveBeenCalledTimes(2));
   expect(visible(screen.getByTestId('mask-confirm-cost'))).toContain('100');
-  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
 });
 
 // The generation half. A `checking` question is a `mask_preview` already on the
@@ -1342,7 +1335,7 @@ test('a mask preview that answers after the reading pass ended raises nothing', 
 
   await emit(endedOnce(11, 1));
   await tick();
-  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toContain('*.md');
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
 
   // The pre-scan answer, arriving after the pass that made it wrong.
   reply.resolve({ paths: 7, documents: 3 });
@@ -1351,7 +1344,7 @@ test('a mask preview that answers after the reading pass ended raises nothing', 
   expect(screen.queryByTestId('mask-confirm')).toBeNull();
   expect(screen.queryByTestId('mask-confirm-cost')).toBeNull();
   // The note is still the one the withdrawal wrote, not replaced by a question.
-  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toContain('*.md');
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
 });
 
 // The pair, and the state that separates «a reading pass ended» from «a job
@@ -1378,7 +1371,6 @@ test('an ending that read no folder leaves the mask question standing', async ()
   await tick();
 
   expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
-  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
 });
 
 // 🔴 External review round 1, Minor 2. The other way the same estimate goes
@@ -1431,7 +1423,6 @@ test('a removal that dropped the index file count withdraws the mask question, a
   });
   await tick();
   expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
-  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
 
   // The removal's own ending: a bare `idle` with a LOWER `files`, `readSeq`
   // untouched — the one shape a `readSeq` trigger cannot see.
@@ -1439,9 +1430,7 @@ test('a removal that dropped the index file count withdraws the mask question, a
   await tick();
 
   expect(screen.queryByTestId('mask-confirm')).toBeNull();
-  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toBe(
-    'The question about mask “*.doc” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
   // The draft survives a removal the same way it survives a reading pass.
   expect((screen.getByLabelText('New mask:') as HTMLInputElement).value).toBe('*.doc');
   expect(addMask).not.toHaveBeenCalled();

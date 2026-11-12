@@ -1031,47 +1031,6 @@ test('excluding a subfolder sends its path and re-reads the listing from disk', 
   expect(listSubfolders).toHaveBeenCalledTimes(2);
 });
 
-// `include_subfolder` answers whether a row went (`bridge.rs:465-471`). `false`
-// is not a failure: it is the screen having been out of date, and saying so is
-// the difference between a control that worked and one that did nothing.
-test('a rule that was already gone says so rather than reporting success in silence', async () => {
-  setLocale('en'); // seed, do not inherit
-  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
-  listSubfolders.mockResolvedValue(subfolders([sub('Old notes', { kind: 'excluded' })]));
-  listExclusions.mockResolvedValue([{ prefix: 'Old notes', existsOnDisk: true }]);
-  includeSubfolder.mockResolvedValue(false);
-
-  render(Folders, { props: { jobs: createJobController() } });
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await panelRead(1);
-
-  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Old notes' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
-
-  await waitFor(() => expect(screen.getByText('There was no such rule left to remove. The list has been re-read.')).toBeTruthy());
-});
-
-test('a rule removal that answers true says nothing about a missing rule', async () => {
-  setLocale('en'); // seed, do not inherit
-  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
-  listSubfolders.mockResolvedValue(subfolders([sub('Old notes', { kind: 'excluded' })]));
-  listExclusions.mockResolvedValue([{ prefix: 'Old notes', existsOnDisk: true }]);
-  includeSubfolder.mockResolvedValue(true);
-
-  render(Folders, { props: { jobs: createJobController() } });
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await panelRead(1);
-
-  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Old notes' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
-
-  await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(1, 'Old notes'));
-  await tick_();
-  expect(screen.queryByText('There was no such rule left to remove. The list has been re-read.')).toBeNull();
-});
-
 test('a rejected list_subfolders shows the backend sentence, apart from the load and action errors', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
@@ -2119,7 +2078,6 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
   await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
   // Both directions: the question is on screen and unwithdrawn until the ending.
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 
   // Task 8: started through the controller directly — see the comment on the
   // first test in this section for why that is still the real wiring.
@@ -2129,10 +2087,7 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
   await endScanAt(1);
 
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
-  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
-    + ' read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   // Withdrawn, not answered: a question taken off the screen must not store the
   // rule it was asking about.
   expect(excludeSubfolder).not.toHaveBeenCalled();
@@ -2144,7 +2099,6 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
   // question about the same folder.
   await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 });
 
 // 🔴 Task 9, the twin of the test above, and the fact the two separate is
@@ -2182,7 +2136,6 @@ test('a job ending that moves no reading counter leaves the question standing, a
   await waitFor(() => expect(listTree.mock.calls.length).toBe(readsBefore + 1));
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
   expect(visibleText(screen.getByTestId('folder-confirm-1'))).toContain('Exclude drop?');
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
@@ -2224,12 +2177,11 @@ test('the embedding phase of a run withdraws the question once the reading count
   await tick();
   expect(listTree.mock.calls.length).toBe(readsBefore);
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 
   await runEmbeddingAt(1);
 
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
-  expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
@@ -2272,7 +2224,6 @@ test('a question raised after the reading counter last moved survives the job en
   await tick();
   await tick();
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
@@ -2304,7 +2255,6 @@ test('an embedding-only run withdraws nothing, and re-reads the counts once', as
 
   await waitFor(() => expect(listTree.mock.calls.length).toBe(readsBefore + 1));
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
@@ -2334,7 +2284,7 @@ test('a check still in flight when a job ends raises no question when its reply 
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   await endScanAt(1);
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
-  expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
 
   release(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
@@ -2421,46 +2371,8 @@ test('a reading pass ending withdraws the question even when the re-read that fo
   await screen.findByTestId('folder-panel-1');
 
   expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
-  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
-    + ' read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
-});
-
-// M1. `settings_folders_question_withdrawn` was asserted only under
-// `setLocale('en')`, and `withdrawnNote` (Folders.svelte:829-832) needed its
-// own switch test by this file's own stated standard (`Folders.test.ts:1450`
-// above, of the exclude/include branches): a literal swapped in for THIS
-// `t()` call specifically would not be caught by a switch test that only ever
-// reaches a different arm.
-test('the withdrawn-question note switches language with everything else', async () => {
-  setLocale('en'); // seed, do not inherit
-  listTree.mockResolvedValue(listing([
-    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
-  ]));
-  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
-  listExclusions.mockResolvedValue([]);
-
-  const { jobs } = renderWatching();
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
-  await screen.findByTestId('folder-confirm-1');
-
-  void jobs.scan('full');
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
-  await endScanAt(1);
-  await screen.findByTestId('folder-question-withdrawn-1');
-
-  setLocale('uk');
-  await tick();
-
-  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'Питання про «drop» знято: індексацію закінчено, і цю панель перечитано.'
-    + ' Натисніть ще раз, якщо це досі потрібно.',
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -2898,7 +2810,6 @@ test('a re-read that keeps this row\'s identity leaves the removal question stan
 
   expect(visibleText(screen.getByTestId('folder-remove-confirm-1')))
     .toBe([REMOVE_QUESTION_EN, 'Confirm', 'Cancel'].join(' '));
-  expect(screen.queryByTestId('folders-remove-withdrawn')).toBeNull();
 
   // The same id, now naming another folder — what a remove-and-add elsewhere
   // does to this window between two reads.
@@ -2910,10 +2821,7 @@ test('a re-read that keeps this row\'s identity leaves the removal question stan
 
   await waitFor(() => expect(screen.getByText('/synthetic/renamed')).toBeTruthy());
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
-  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
-    + ' the list was read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   expect(removeWatchedFolder).not.toHaveBeenCalled();
 });
 
@@ -2935,10 +2843,7 @@ test('a removal question about a root that leaves the listing is withdrawn by na
 
   await waitFor(() => expect(screen.queryByText('/synthetic/root')).toBeNull());
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
-  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
-    + ' the list was read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   expect(removeWatchedFolder).not.toHaveBeenCalled();
 });
 
@@ -3025,9 +2930,8 @@ test('a refused removal shows the backend sentence verbatim and re-reads the lis
 // and ONE sentence says why. Read live from the store, not captured at the
 // press: a run starting while the question is open has to reach the Confirm
 // button that is already drawn.
-test('while a job runs every «Remove» is disabled with one sentence, and an open question cannot be confirmed', async () => {
+test('while a job runs every «Remove» is disabled, and an open question cannot be confirmed', async () => {
   await showTwoRoots();
-  expect(screen.queryByTestId('folders-remove-blocked')).toBeNull(); // the direction before
 
   await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
@@ -3038,32 +2942,20 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   await runEmbeddingAt(0); // a job takes the slot while the question is open
   await tick();
 
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
   expect((await removeButton('/synthetic/root')).disabled).toBe(true);
   expect((await removeButton('/synthetic/other')).disabled).toBe(true);
   expect(confirm().disabled).toBe(true);
 
-  // This sentence's own switch, for the reason every other one on this screen
-  // has its own: it is a separate `t()` call behind a separate `void $locale`.
-  setLocale('uk');
-  await tick();
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Кнопка «Видалити» запрацює після зупинки сканування.');
-  setLocale('en');
-  await tick();
-
   // Ended is not running: the offer comes back, and so does the answer to the
   // question still on screen.
   await endScan();
-  await waitFor(() => expect(screen.queryByTestId('folders-remove-blocked')).toBeNull());
   expect((await removeButton('/synthetic/root')).disabled).toBe(false);
   expect(confirm().disabled).toBe(false);
 
   // And so is idle, which is a different snapshot and a different row of the
   // same table.
   await runEmbeddingAt(0);
-  await waitFor(() => expect(screen.getByTestId('folders-remove-blocked')).toBeTruthy());
   await goIdle();
-  await waitFor(() => expect(screen.queryByTestId('folders-remove-blocked')).toBeNull());
   expect((await removeButton('/synthetic/root')).disabled).toBe(false);
 });
 
@@ -3082,7 +2974,6 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   await tick();
   await tick();
   expect(screen.getByTestId('folder-remove-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folders-remove-withdrawn')).toBeNull();
 
   await endScanAt(1);
 
@@ -3091,22 +2982,15 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   // is the last one: the LIST was read again, not a panel. This question's row
   // is collapsed here, as it is in the common case, so a note claiming a panel
   // had been re-read named something nobody could see.
-  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
-    + ' the list was read again. Press again if you still want to.',
-  );
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   // And the panel's own note is not on screen at all: two keys, two subjects.
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(removeWatchedFolder).not.toHaveBeenCalled();
 
   // A `t()` call site of its own with its own `void $locale`, so it owes its
   // own switch — exactly as the panel's note did (`M1`, above).
   setLocale('uk');
   await tick();
-  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'Питання про теку «/synthetic/root» знято: індексацію закінчено, і список перечитано.'
-    + ' Натисніть ще раз, якщо це досі потрібно.',
-  );
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   setLocale('en');
   await tick();
 
@@ -3114,7 +2998,6 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   // question about the same folder says two things at once.
   await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
-  expect(screen.queryByTestId('folders-remove-withdrawn')).toBeNull();
 });
 
 // The states separated: "the question is this person's language" and "the
@@ -3179,53 +3062,6 @@ test('a press elsewhere in this list abandons the removal question', async () =>
 
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-2')).toBeNull());
   expect(removeWatchedFolder).not.toHaveBeenCalled();
-});
-
-// 🔴 Fix round 1, m2. The states separated: "there is a disabled «Remove» on
-// screen" and "there is not". The sentence explains why every «Remove» is
-// refused, so over an empty list it names a control the person cannot see —
-// and over a `loadError` it does the same, because that branch replaces the
-// whole list with its own two lines while `roots` still holds what was read
-// before it.
-test('the blocked sentence is drawn only where there is a «Remove» for it to explain', async () => {
-  setLocale('en'); // seed, do not inherit
-  listTree.mockResolvedValue(listing([]));
-  renderWatching();
-  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
-
-  await runEmbeddingAt(0);
-  await tick();
-
-  expect(screen.queryByTestId('folders-remove-blocked')).toBeNull();
-
-  // One root, the same running job: now there is a button, and the sentence
-  // says why it cannot be pressed.
-  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
-  await endScan(); // re-reads the list; the counter does not move
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  await runEmbeddingAt(0);
-  await tick();
-
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
-  expect((await removeButton('/synthetic/root')).disabled).toBe(true);
-
-  // And the third state, which `roots.length` alone cannot tell from the
-  // second: the list is unreadable, so it is off the screen entirely while
-  // `roots` still remembers the row — `refresh` throws before it assigns.
-  //
-  // 🔴 The failure has to be taken while the job is NOT running and the run
-  // resumed afterwards, because only an ending re-reads: a rejection delivered
-  // during the run would leave the snapshot `ended` and take the sentence off
-  // the screen for the wrong reason, and this arm would pass against the very
-  // guard it is here to pin.
-  listTree.mockRejectedValueOnce(new Error('The index is not open yet.'));
-  await endScan();
-  await waitFor(() => expect(screen.getByText('The list of folders could not be read.')).toBeTruthy());
-  await runEmbeddingAt(0);
-  await tick();
-
-  expect(screen.getByText('The list of folders could not be read.')).toBeTruthy(); // still off screen
-  expect(screen.queryByTestId('folders-remove-blocked')).toBeNull();
 });
 
 // 🔴 Fix round 1, m5. The arms the component itself renders, rather than the
@@ -3301,7 +3137,6 @@ test('a window opened after a reading pass has already ended does not withdraw o
 
   await waitFor(() => expect(listTree.mock.calls.length).toBe(readsBefore + 1));
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
@@ -3897,7 +3732,6 @@ for (const [kind, tick, change] of [
     await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', tick));
     await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(1));
     await tick_();
-    expect(screen.queryByText(t('settings_folders_rule_already_gone'))).toBeNull();
   });
 }
 
