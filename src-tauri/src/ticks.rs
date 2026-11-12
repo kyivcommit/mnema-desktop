@@ -1,19 +1,23 @@
-//! The folders tree's tick, as ONE change to a root's exclusion rules.
+//! The folders tree's tick, as ONE change to a root's path rules.
 //!
 //! A tick is not always one rule. Ticking a file under an excluded folder
 //! takes the folder's rule away and puts one on every sibling left unticked
 //! (push-down); unticking the last ticked entry of a folder folds the
 //! siblings' rules back into one rule on the folder (fold-back); clicking a
-//! mixed box removes every rule under the folder. [`plan_tick`] decides the
-//! whole change from the disk and the stored rules, and [`set_tick`] writes it
-//! in one transaction — never as several commands from the window, because the
-//! moment between two of them (the folder on, its siblings not yet excluded)
-//! is exactly when a scan would index what the person kept out (spec C, D29).
+//! mixed box removes every rule under the folder. Since the folders tree PR 3
+//! a tick may also store or take away an *include* past `.gitignore` (D202).
+//! [`plan_tick`] decides the whole change from the disk and the stored rules,
+//! and [`set_tick`] writes it in one transaction — never as several commands
+//! from the window, because the moment between two of them (the folder on,
+//! its siblings not yet excluded) is exactly when a scan would index what the
+//! person kept out (spec C, D29). [`preview_tick`] answers the same plan and
+//! writes nothing, so a question can name its cost.
 
 use crate::error::Error;
 use crate::tree::{SubfolderListing, SubfolderState};
-use mnema_walk::WalkRules;
+use mnema_walk::{GitignoreLayer, WalkRules};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// What the person did to one tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -21,55 +25,112 @@ use serde::{Deserialize, Serialize};
 pub enum Tick {
     /// Unticked an indexed entry.
     Off,
-    /// Ticked an empty box — an excluded entry, or one under an excluded
-    /// folder.
+    /// Ticked an empty box — an excluded entry, one under an excluded folder,
+    /// or one `.gitignore` holds.
     On,
     /// Clicked a mixed box: tick everything inside.
     All,
 }
 
-/// The rules a tick takes away and the ones it stores, each sorted. Empty is a
-/// real answer: nothing changed (the entry has no control, or is gone).
+/// The rules a tick takes away and the ones it stores, each sorted: `added` /
+/// `removed` are exclusions, `included` / `unincluded` are includes past
+/// `.gitignore`. Empty is a real answer: nothing changed (the entry has no
+/// control, or is gone).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleChange {
     pub added: Vec<String>,
     pub removed: Vec<String>,
+    pub included: Vec<String>,
+    pub unincluded: Vec<String>,
+}
+
+/// A root's stored path rules, both kinds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Stored {
+    pub exclusions: Vec<String>,
+    pub includes: Vec<String>,
+}
+
+/// Store `prefix` in one set, unless the same change takes it away (then it
+/// simply stays) or it is stored already.
+fn put(added: &mut Vec<String>, removed: &mut Vec<String>, stored: &[String], prefix: &str) {
+    if let Some(i) = removed.iter().position(|p| p == prefix) {
+        removed.remove(i);
+    } else if !stored.iter().any(|p| p == prefix) && !added.iter().any(|p| p == prefix) {
+        added.push(prefix.to_string());
+    }
+}
+
+/// Take `prefix` away from one set, if it is stored or this change was about
+/// to store it.
+fn take(added: &mut Vec<String>, removed: &mut Vec<String>, stored: &[String], prefix: &str) {
+    if let Some(i) = added.iter().position(|p| p == prefix) {
+        added.remove(i);
+    } else if stored.iter().any(|p| p == prefix) && !removed.iter().any(|p| p == prefix) {
+        removed.push(prefix.to_string());
+    }
+}
+
+fn applied(stored: &[String], added: &[String], removed: &[String]) -> Vec<String> {
+    stored
+        .iter()
+        .filter(|p| !removed.contains(p))
+        .chain(added.iter())
+        .cloned()
+        .collect()
 }
 
 impl RuleChange {
-    /// Store `prefix`, unless the same change takes it away (then it simply
-    /// stays) or it is stored already.
-    fn add(&mut self, stored: &[String], prefix: &str) {
-        if let Some(i) = self.removed.iter().position(|p| p == prefix) {
-            self.removed.remove(i);
-        } else if !stored.iter().any(|p| p == prefix) && !self.added.iter().any(|p| p == prefix) {
-            self.added.push(prefix.to_string());
-        }
+    fn add(&mut self, stored: &Stored, prefix: &str) {
+        put(
+            &mut self.added,
+            &mut self.removed,
+            &stored.exclusions,
+            prefix,
+        );
     }
 
-    /// Take `prefix` away, if it is stored or this change was about to store it.
-    fn remove(&mut self, stored: &[String], prefix: &str) {
-        if let Some(i) = self.added.iter().position(|p| p == prefix) {
-            self.added.remove(i);
-        } else if stored.iter().any(|p| p == prefix) && !self.removed.iter().any(|p| p == prefix) {
-            self.removed.push(prefix.to_string());
-        }
+    fn remove(&mut self, stored: &Stored, prefix: &str) {
+        take(
+            &mut self.added,
+            &mut self.removed,
+            &stored.exclusions,
+            prefix,
+        );
+    }
+
+    fn include(&mut self, stored: &Stored, prefix: &str) {
+        put(
+            &mut self.included,
+            &mut self.unincluded,
+            &stored.includes,
+            prefix,
+        );
+    }
+
+    fn uninclude(&mut self, stored: &Stored, prefix: &str) {
+        take(
+            &mut self.included,
+            &mut self.unincluded,
+            &stored.includes,
+            prefix,
+        );
     }
 
     /// The stored rules as they would be after this change.
-    fn applied_to(&self, stored: &[String]) -> Vec<String> {
-        stored
-            .iter()
-            .filter(|p| !self.removed.contains(p))
-            .chain(self.added.iter())
-            .cloned()
-            .collect()
+    fn applied_to(&self, stored: &Stored) -> Stored {
+        Stored {
+            exclusions: applied(&stored.exclusions, &self.added, &self.removed),
+            includes: applied(&stored.includes, &self.included, &self.unincluded),
+        }
     }
 
     fn sorted(mut self) -> Self {
         self.added.sort();
         self.removed.sort();
+        self.included.sort();
+        self.unincluded.sort();
         self
     }
 }
@@ -85,40 +146,82 @@ fn under(path: &str, prefix: &str) -> bool {
 }
 
 /// A row that the walk indexes as it stands, for folding (the plan's ruling
-/// 4): `UnusableName` counts, because it IS indexed and carries no rule.
+/// 4): `UnusableName` counts, because it IS indexed and carries no rule. Since
+/// PR 3 an included row counts, and so does a held folder the walk goes into
+/// for an include below it (plan ruling 6).
 fn ticked(state: &SubfolderState) -> bool {
-    matches!(state, SubfolderState::Open | SubfolderState::UnusableName)
+    matches!(
+        state,
+        SubfolderState::Open
+            | SubfolderState::UnusableName
+            | SubfolderState::GitIncluded { .. }
+            | SubfolderState::GitIgnoredOpen { .. }
+    )
 }
 
-/// One level of the disk under a set of prefixes — see [`plan_tick`].
-pub(crate) type ReadLevel<'a> = dyn FnMut(&str, &[String]) -> Result<SubfolderListing, Error> + 'a;
+fn held_by_gitignore(state: &SubfolderState) -> bool {
+    matches!(
+        state,
+        SubfolderState::GitIgnored { .. } | SubfolderState::GitIgnoredOpen { .. }
+    )
+}
 
-/// The whole change one tick makes. `level(dir, prefixes)` lists one level of
-/// the disk classified under `prefixes` — the command hands it the real
+/// One level of the disk under a set of rules — see [`plan_tick`].
+pub(crate) type ReadLevel<'a> = dyn FnMut(&str, &Stored) -> Result<SubfolderListing, Error> + 'a;
+
+/// The state of the row at `path` under `rules`, read from its parent's level.
+fn state_at(
+    level: &mut ReadLevel<'_>,
+    path: &str,
+    rules: &Stored,
+) -> Result<Option<SubfolderState>, Error> {
+    Ok(level(parent(path), rules)?
+        .entries
+        .into_iter()
+        .find(|e| e.relative_path == path)
+        .map(|e| e.state))
+}
+
+/// The whole change one tick makes. `level(dir, rules)` lists one level of
+/// the disk classified under `rules` — the command hands it the real
 /// directory, read through the same `read_subfolders` the tree draws from, so
 /// the siblings a push-down rules out are the disk's, not the window's.
+/// `held_below(dir)` lists the topmost rows at or under `dir` that `.gitignore`
+/// holds, ignoring includes ([`GitignoreLayer::held_below`]).
 pub(crate) fn plan_tick(
     root_id: i64,
-    stored: &[String],
+    stored: &Stored,
     path: &str,
     tick: Tick,
     level: &mut ReadLevel<'_>,
+    held_below: &mut dyn FnMut(&str) -> Vec<String>,
 ) -> Result<RuleChange, Error> {
     let mut change = RuleChange::default();
-    let here = level(parent(path), stored)?;
-    let Some(entry) = here.entries.iter().find(|e| e.relative_path == path) else {
+    let Some(state) = state_at(level, path, stored)? else {
         return Ok(change);
     };
-    match (tick, &entry.state) {
-        (Tick::Off, SubfolderState::Open) => {
-            change.add(stored, path);
+    match (tick, &state) {
+        (Tick::Off, SubfolderState::Open | SubfolderState::GitIncluded { .. }) => {
+            // The row's OWN include goes back to `.gitignore`; anything else
+            // that is on gets a rule (plan ruling 4).
+            match &state {
+                SubfolderState::GitIncluded { include } if include == path => {
+                    change.uninclude(stored, path)
+                }
+                _ => change.add(stored, path),
+            }
             // Fold-back: climb while the folder has nothing ticked left. The
-            // root is never folded — no rule can name it.
+            // root is never folded — no rule can name it — and neither is a
+            // folder `.gitignore` holds: a rule there would change nothing
+            // (spec, rule 3; plan ruling 6).
             let mut dir = parent(path);
             while !dir.is_empty() {
                 let now = change.applied_to(stored);
                 let listing = level(dir, &now)?;
                 if listing.entries.iter().any(|e| ticked(&e.state)) {
+                    break;
+                }
+                if state_at(level, dir, &now)?.is_some_and(|s| held_by_gitignore(&s)) {
                     break;
                 }
                 // Only the direct children's own rules (the plan's ruling 7):
@@ -151,9 +254,16 @@ pub(crate) fn plan_tick(
                     if matches!(e.state, SubfolderState::BuiltIn | SubfolderState::Symlink) {
                         continue;
                     }
+                    let carriable = WalkRules::check_prefix(&e.relative_path).is_ok();
+                    // A sibling `.gitignore` holds needs no rule to stay out,
+                    // so a name no rule can carry is no reason to refuse
+                    // (plan ruling 7) — it simply gets none.
+                    if !carriable && held_by_gitignore(&e.state) {
+                        continue;
+                    }
                     // A sibling no rule can carry would start being indexed
                     // without a word: refuse the whole tick (the plan's ruling 5).
-                    if WalkRules::check_prefix(&e.relative_path).is_err() {
+                    if !carriable {
                         return Err(Error::CannotExcludeBeside {
                             root_id,
                             relative_path: e.relative_path.clone(),
@@ -168,22 +278,130 @@ pub(crate) fn plan_tick(
             }
             change.remove(stored, path);
         }
-        (Tick::All, SubfolderState::Open) => {
-            for prefix in stored.iter().filter(|p| under(p, path)) {
+        (Tick::All, SubfolderState::Open | SubfolderState::GitIgnoredOpen { .. }) => {
+            for prefix in stored.exclusions.iter().filter(|p| under(p, path)) {
                 change.remove(stored, prefix);
+            }
+            for prefix in stored.includes.iter().filter(|p| under(p, path)) {
+                change.uninclude(stored, prefix);
+            }
+            // Each topmost row `.gitignore` holds, not one include on the
+            // folder: a `.gitignore` line added later must still act under it
+            // (plan ruling 8).
+            for held in held_below(path) {
+                // A name no include can carry stays out — the safe direction.
+                if WalkRules::check_prefix(&held).is_ok() {
+                    change.include(stored, &held);
+                }
             }
         }
         _ => {}
     }
+    // Whatever a tick turned ON that `.gitignore` still holds gets its include
+    // in the same change — a push-down under a folder `.gitignore` also names
+    // is one press (plan ruling 5).
+    if tick == Tick::On {
+        let now = change.applied_to(stored);
+        if let Some(SubfolderState::GitIgnored { .. }) = state_at(level, path, &now)? {
+            WalkRules::check_prefix(path)?;
+            change.include(stored, path);
+        }
+    }
     Ok(change.sorted())
+}
+
+/// [`plan_tick`] against the real folder at `root` (already canonical): the
+/// levels through the listing's own `read_level`, under the walk's own
+/// `.gitignore` layer built from the rules each step proposes.
+pub(crate) fn plan_on_disk(
+    root: &Path,
+    root_id: i64,
+    stored: &Stored,
+    mask_names: &[String],
+    skips: &[mnema_index::SkippedFile],
+    path: &str,
+    tick: Tick,
+) -> Result<RuleChange, Error> {
+    let walk = WalkRules::none().with_masks(mask_names.to_vec())?;
+    let layers = WalkRules::builtin_layers(root);
+    let mut level = |dir: &str, rules: &Stored| {
+        let git = GitignoreLayer::new(root, &rules.includes);
+        let level_rules = crate::tree::LevelRules::new(
+            root,
+            &layers,
+            &rules.exclusions,
+            walk.masks(),
+            mask_names,
+            skips,
+            &git,
+        );
+        let resolved = crate::tree::subfolder_dir(root, root_id, dir)?;
+        crate::tree::read_level(&resolved, root_id, dir, &level_rules)
+    };
+    let bare = GitignoreLayer::new(root, &[]);
+    let masks = walk.masks().clone();
+    let mut held_below = |dir: &str| {
+        bare.held_below(dir, &|relative, is_dir| {
+            layers.prunes_entry(relative, is_dir) || (!is_dir && masks.matches(relative))
+        })
+    };
+    plan_tick(root_id, stored, path, tick, &mut level, &mut held_below)
+}
+
+/// The guards `set_tick` and `preview_tick` share, then the plan.
+///
+/// The same guards as `exclude_subfolder` (`bridge.rs`): an unknown root, a
+/// root that is not there, a blank path, a path no rule can carry.
+fn planned(
+    state: &crate::state::AppState,
+    root_id: i64,
+    relative_path: &str,
+    tick: Tick,
+) -> Result<RuleChange, Error> {
+    let root = state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(Error::RootUnavailable(root_id));
+    }
+    if relative_path.is_empty() {
+        return Err(Error::BlankExclusionRule);
+    }
+    // Only a tick that STORES this path as a rule has to pass the validator.
+    // Taking a rule away must always work, including one an older build
+    // stored under a name today's validator refuses (`include_subfolder`).
+    if tick == Tick::Off {
+        WalkRules::check_prefix(relative_path)?;
+    }
+    let root_canonical = root_path
+        .canonicalize()
+        .map_err(|_| Error::RootUnavailable(root_id))?;
+    let (stored, mask_names, skips) = state.with_index(|db| {
+        Ok::<_, mnema_index::Error>((
+            Stored {
+                exclusions: db.list_path_exclusions(root_id)?,
+                includes: db.list_gitignore_includes(root_id)?,
+            },
+            db.list_masks()?,
+            crate::tree::whole_file_skips(db.skips_for_root(root_id)?),
+        ))
+    })?;
+    plan_on_disk(
+        &root_canonical,
+        root_id,
+        &stored,
+        &mask_names,
+        &skips,
+        relative_path,
+        tick,
+    )
 }
 
 /// Off the main thread for the reason given on [`crate::bridge::open_index`].
 ///
-/// The same guards as `exclude_subfolder` (`bridge.rs`): an unknown root, a
-/// root that is not there, a blank path, a path no rule can carry. Then the
-/// change is planned from the disk and the stored rules and written in one
-/// transaction ([`mnema_index::Db::change_path_rules`]).
+/// The change is planned from the disk and the stored rules and written in
+/// one transaction ([`mnema_index::Db::change_path_rules`]).
 ///
 /// ⚠️ The plan is read outside the index lock and written inside it. The only
 /// writer of these rules is this window, one press at a time, so nothing moves
@@ -195,50 +413,7 @@ pub fn set_tick(
     relative_path: String,
     tick: Tick,
 ) -> Result<RuleChange, Error> {
-    let root = state
-        .with_index(|db| db.watched_root_path(root_id))?
-        .ok_or(Error::UnknownWatchedRoot(root_id))?;
-    let root_path = std::path::Path::new(&root);
-    if !root_path.is_dir() {
-        return Err(Error::RootUnavailable(root_id));
-    }
-    if relative_path.is_empty() {
-        return Err(Error::BlankExclusionRule);
-    }
-    // Only a tick that STORES this path as a rule has to pass the validator.
-    // Taking a rule away must always work, including one an older build
-    // stored under a name today's validator refuses (`include_subfolder`).
-    if tick == Tick::Off {
-        WalkRules::check_prefix(&relative_path)?;
-    }
-    let root_canonical = root_path
-        .canonicalize()
-        .map_err(|_| Error::RootUnavailable(root_id))?;
-    let (stored, mask_names, skips, includes) = state.with_index(|db| {
-        Ok::<_, mnema_index::Error>((
-            db.list_path_exclusions(root_id)?,
-            db.list_masks()?,
-            crate::tree::whole_file_skips(db.skips_for_root(root_id)?),
-            db.list_gitignore_includes(root_id)?,
-        ))
-    })?;
-    let git = mnema_walk::GitignoreLayer::new(&root_canonical, &includes);
-    let walk = WalkRules::none().with_masks(mask_names.clone())?;
-    let layers = WalkRules::builtin_layers(&root_canonical);
-    let mut level = |dir: &str, prefixes: &[String]| {
-        let rules = crate::tree::LevelRules::new(
-            &root_canonical,
-            &layers,
-            prefixes,
-            walk.masks(),
-            &mask_names,
-            &skips,
-            &git,
-        );
-        let resolved = crate::tree::subfolder_dir(&root_canonical, root_id, dir)?;
-        crate::tree::read_level(&resolved, root_id, dir, &rules)
-    };
-    let change = plan_tick(root_id, &stored, &relative_path, tick, &mut level)?;
+    let change = planned(&state, root_id, &relative_path, tick)?;
     if change != RuleChange::default() {
         state.with_index(|db| {
             db.change_path_rules(
@@ -246,12 +421,26 @@ pub fn set_tick(
                 &mnema_index::PathRuleChange {
                     excluded_removed: change.removed.clone(),
                     excluded_added: change.added.clone(),
-                    ..Default::default()
+                    included_removed: change.unincluded.clone(),
+                    included_added: change.included.clone(),
                 },
             )
         })?;
     }
     Ok(change)
+}
+
+/// What [`set_tick`] would change, written nowhere: the window's question
+/// about a mixed box names how many rules go and how many rows `.gitignore`
+/// named start being indexed (plan ruling 9).
+#[tauri::command(async)]
+pub fn preview_tick(
+    state: tauri::State<'_, crate::state::AppState>,
+    root_id: i64,
+    relative_path: String,
+    tick: Tick,
+) -> Result<RuleChange, Error> {
+    planned(&state, root_id, &relative_path, tick)
 }
 
 #[cfg(test)]
@@ -284,10 +473,9 @@ mod tests {
     /// A fake `level`: classifies each entry the way `subfolder_state` does —
     /// built-in, masked and not-read first, then the person's rules, then the
     /// name — over the prefixes it is handed.
-    fn level_of(
-        disk: &Disk,
-    ) -> impl FnMut(&str, &[String]) -> Result<SubfolderListing, Error> + '_ {
-        move |dir, prefixes| {
+    fn level_of(disk: &Disk) -> impl FnMut(&str, &Stored) -> Result<SubfolderListing, Error> + '_ {
+        move |dir, rules| {
+            let prefixes = &rules.exclusions;
             let entries = disk
                 .get(dir)
                 .unwrap_or_else(|| panic!("plan_tick read {dir:?}, which the fixture has not"))
@@ -330,14 +518,20 @@ mod tests {
     }
 
     fn plan(disk: &Disk, prefixes: &[&str], path: &str, tick: Tick) -> Result<RuleChange, Error> {
-        let prefixes: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
-        plan_tick(1, &prefixes, path, tick, &mut level_of(disk))
+        let stored = Stored {
+            exclusions: prefixes.iter().map(|p| p.to_string()).collect(),
+            includes: Vec::new(),
+        };
+        plan_tick(1, &stored, path, tick, &mut level_of(disk), &mut |_| {
+            Vec::new()
+        })
     }
 
     fn change(added: &[&str], removed: &[&str]) -> RuleChange {
         RuleChange {
             added: added.iter().map(|p| p.to_string()).collect(),
             removed: removed.iter().map(|p| p.to_string()).collect(),
+            ..RuleChange::default()
         }
     }
 
@@ -587,5 +781,182 @@ mod tests {
             plan(&disk, &[], "gone.pdf", Tick::Off).unwrap(),
             RuleChange::default()
         );
+    }
+
+    /// D202 PR 3: ticks over `.gitignore`, planned against a REAL folder and
+    /// the walk's own `.gitignore` layer — the same `plan_on_disk` the
+    /// commands call, so no fake reimplements `.gitignore` here.
+    mod gitignore {
+        use super::super::*;
+        use std::fs;
+
+        fn disk(files: &[(&str, &str)]) -> tempfile::TempDir {
+            let root = tempfile::tempdir().unwrap();
+            for (path, body) in files {
+                let full = root.path().join(path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(full, body).unwrap();
+            }
+            root
+        }
+
+        fn strings(paths: &[&str]) -> Vec<String> {
+            paths.iter().map(|p| p.to_string()).collect()
+        }
+
+        fn plan(
+            root: &tempfile::TempDir,
+            exclusions: &[&str],
+            includes: &[&str],
+            path: &str,
+            tick: Tick,
+        ) -> Result<RuleChange, Error> {
+            let root = root.path().canonicalize().unwrap();
+            let stored = Stored {
+                exclusions: strings(exclusions),
+                includes: strings(includes),
+            };
+            plan_on_disk(&root, 1, &stored, &[], &[], path, tick)
+        }
+
+        fn change(
+            added: &[&str],
+            removed: &[&str],
+            included: &[&str],
+            unincluded: &[&str],
+        ) -> RuleChange {
+            RuleChange {
+                added: strings(added),
+                removed: strings(removed),
+                included: strings(included),
+                unincluded: strings(unincluded),
+            }
+        }
+
+        #[test]
+        fn on_on_a_gitignored_row_adds_its_include_only() {
+            let root = disk(&[(".gitignore", "*.log\n"), ("a.log", "x"), ("b.txt", "x")]);
+            assert_eq!(
+                plan(&root, &[], &[], "a.log", Tick::On).unwrap(),
+                change(&[], &[], &["a.log"], &[])
+            );
+        }
+
+        #[test]
+        fn off_on_an_included_row_removes_its_include_and_adds_no_rule() {
+            let root = disk(&[(".gitignore", "*.log\n"), ("a.log", "x"), ("b.txt", "x")]);
+            assert_eq!(
+                plan(&root, &[], &["a.log"], "a.log", Tick::Off).unwrap(),
+                change(&[], &[], &[], &["a.log"])
+            );
+        }
+
+        #[test]
+        fn off_under_an_include_adds_an_exclusion() {
+            let root = disk(&[
+                (".gitignore", "vendor/\n"),
+                ("vendor/a.txt", "x"),
+                ("vendor/b.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &[], &["vendor"], "vendor/a.txt", Tick::Off).unwrap(),
+                change(&["vendor/a.txt"], &[], &[], &[])
+            );
+        }
+
+        #[test]
+        fn on_under_a_rule_and_gitignore_pushes_down_and_includes_in_one_change() {
+            let root = disk(&[
+                (".gitignore", "build/\n"),
+                ("build/x.txt", "x"),
+                ("build/y.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &["build"], &[], "build/x.txt", Tick::On).unwrap(),
+                change(&["build/y.txt"], &["build"], &["build/x.txt"], &[])
+            );
+        }
+
+        #[test]
+        fn folding_stops_at_a_folder_gitignore_holds() {
+            let root = disk(&[
+                (".gitignore", "build/\n"),
+                ("build/x/keep.txt", "x"),
+                ("build/x/other.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(
+                    &root,
+                    &[],
+                    &["build/x/keep.txt"],
+                    "build/x/keep.txt",
+                    Tick::Off
+                )
+                .unwrap(),
+                change(&[], &[], &[], &["build/x/keep.txt"])
+            );
+        }
+
+        #[test]
+        fn push_down_rules_out_a_gitignored_sibling_without_refusing_its_name() {
+            let root = disk(&[
+                (".gitignore", "a/c*\n*.log\n"),
+                ("a/b.txt", "x"),
+                ("a/c\\x", "x"),
+                ("a/d.log", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &["a"], &[], "a/b.txt", Tick::On).unwrap(),
+                change(&["a/d.log"], &["a"], &[], &[])
+            );
+        }
+
+        #[test]
+        fn all_includes_the_topmost_held_rows_and_drops_rules_under_the_folder() {
+            let root = disk(&[
+                (".gitignore", "*.log\nbuild/\n"),
+                ("a/x.log", "x"),
+                ("a/build/z.txt", "x"),
+                ("a/y.txt", "x"),
+                ("a/sub/q.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &["a/sub"], &["a/build/z.txt"], "a", Tick::All).unwrap(),
+                change(&[], &["a/sub"], &["a/build", "a/x.log"], &["a/build/z.txt"])
+            );
+        }
+
+        #[test]
+        fn all_on_a_held_open_folder_includes_the_folder() {
+            let root = disk(&[
+                (".gitignore", "build/\n"),
+                ("build/x/keep.txt", "x"),
+                ("build/y.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &[], &["build/x/keep.txt"], "build", Tick::All).unwrap(),
+                change(&[], &[], &["build"], &["build/x/keep.txt"])
+            );
+        }
+
+        #[test]
+        fn an_included_sibling_blocks_folding() {
+            let root = disk(&[
+                (".gitignore", "*.log\n"),
+                ("a/b.txt", "x"),
+                ("a/c.log", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &[], &["a/c.log"], "a/b.txt", Tick::Off).unwrap(),
+                change(&["a/b.txt"], &[], &[], &[])
+            );
+        }
+
+        #[test]
+        fn on_refuses_an_include_no_rule_can_carry() {
+            let root = disk(&[(".gitignore", "*.log\n"), ("a .log", "x")]);
+            fs::rename(root.path().join("a .log"), root.path().join(" a.log")).unwrap();
+            assert!(plan(&root, &[], &[], " a.log", Tick::On).is_err());
+        }
     }
 }

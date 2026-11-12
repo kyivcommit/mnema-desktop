@@ -392,6 +392,8 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "exclude_subfolder",
         "include_subfolder",
         "list_subfolders",
+        "set_tick",
+        "preview_tick",
         // PR 9 Task 2. 🔴 These three are `(async)` for a reason that is not
         // performance: `GlobalShortcut::register` and `unregister` post a
         // closure with `run_on_main_thread` and then block on `rx.recv()`
@@ -15065,7 +15067,7 @@ fn set_tick_pushes_down_and_the_next_walk_indexes_only_the_ticked_file() {
     .expect("set_tick was rejected");
     assert_eq!(
         change,
-        json!({ "added": ["a/c.txt", "a/d"], "removed": ["a"] }),
+        json!({ "added": ["a/c.txt", "a/d"], "removed": ["a"], "included": [], "unincluded": [] }),
         "{change}"
     );
 
@@ -15150,7 +15152,7 @@ fn set_tick_on_removes_a_rule_the_validator_now_refuses() {
 
     assert_eq!(
         change,
-        json!({ "added": [], "removed": ["old "] }),
+        json!({ "added": [], "removed": ["old "], "included": [], "unincluded": [] }),
         "{change}"
     );
     let left = app
@@ -15356,4 +15358,94 @@ fn the_scan_indexes_an_included_file_and_nothing_beside_it() {
         !paths.contains(&"build/x/other.txt".to_string()),
         "{paths:?}"
     );
+}
+
+// ── Folders tree PR 3: set_tick with includes, preview_tick ────────────────
+
+fn rules_of(app: &tauri::App<MockRuntime>, root: i64) -> (Vec<String>, Vec<String>) {
+    app.state::<AppState>()
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>((
+                db.list_path_exclusions(root)?,
+                db.list_gitignore_includes(root)?,
+            ))
+        })
+        .unwrap()
+}
+
+/// A folder `.gitignore` names AND the person excluded, with two files.
+fn gitignored_and_excluded(webview: &WebviewWindow<MockRuntime>) -> (tempfile::TempDir, i64) {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("build")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/x.txt"), "the ticked file").unwrap();
+    std::fs::write(fixture.path().join("build/y.txt"), "a sibling").unwrap();
+    let root = root_for(webview, fixture.path());
+    call(
+        webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "build" }),
+    )
+    .expect("excluding build was rejected");
+    (fixture, root)
+}
+
+#[test]
+fn preview_tick_writes_nothing_and_answers_what_set_tick_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let (_fixture, root) = gitignored_and_excluded(&webview);
+    let before = rules_of(&app, root);
+    let args = json!({ "rootId": root, "relativePath": "build/x.txt", "tick": "on" });
+
+    let preview = call(&webview, "preview_tick", args.clone()).expect("preview_tick was rejected");
+    assert_eq!(
+        rules_of(&app, root),
+        before,
+        "preview_tick wrote: {preview}"
+    );
+
+    let written = call(&webview, "set_tick", args).expect("set_tick was rejected");
+    assert_eq!(preview, written);
+}
+
+/// One press under a rule AND `.gitignore`: the rule pushed down, the include
+/// stored, both in one write — and the next scan indexes only the ticked file.
+#[test]
+fn set_tick_writes_exclusions_and_includes_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let (_fixture, root) = gitignored_and_excluded(&webview);
+
+    let change = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "build/x.txt", "tick": "on" }),
+    )
+    .expect("set_tick was rejected");
+    assert_eq!(
+        change,
+        json!({
+            "added": ["build/y.txt"],
+            "removed": ["build"],
+            "included": ["build/x.txt"],
+            "unincluded": []
+        }),
+        "{change}"
+    );
+    assert_eq!(
+        rules_of(&app, root),
+        (
+            vec!["build/y.txt".to_string()],
+            vec!["build/x.txt".to_string()]
+        )
+    );
+
+    scan_to_completion(app.handle());
+    // `.gitignore` itself is an ordinary text file and is indexed too.
+    let paths = indexed_paths(&app, root);
+    assert!(paths.contains(&"build/x.txt".to_string()), "{paths:?}");
+    assert!(!paths.contains(&"build/y.txt".to_string()), "{paths:?}");
 }
