@@ -137,8 +137,8 @@ case_ "the row's controls must be named, because undefined is not 'none'" \
 # `aria-expanded`.
 case_ "a write into a panel that is gone must be dropped, not turned into a new panel" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(panel === undefined\) return; // the row was shut while this was running\n    panels = \{ \.\.\.panels, \[rootId\]: \{ \.\.\.panel, \.\.\.fields \} \};}{    panels = \{ ...panels, [rootId]: \{ ...(panel ?? \{ tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null \}), ...fields \} \};}" \
-  "    panels = { ...panels, [rootId]: { ...(panel ?? { tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null }), ...fields } };" \
+  "s{    if \(panel === undefined\) return; // the row was shut while this was running\n    const next = \{ \.\.\.panel, \.\.\.fields \};}{    const next = \{ ...(panel ?? \{ tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null \}), ...fields \};}" \
+  "    const next = { ...(panel ?? { tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null }), ...fields };" \
   src/settings/Folders.test.ts 'a row shut while an exclude is in flight is not re-opened by the re-read behind it' runner=vitest
 
 # Task 5. An excluded folder is still one a person can look inside, even though

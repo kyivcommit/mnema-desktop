@@ -110,6 +110,11 @@
   let removing = $state<number | null>(null);
   // D202: the folder whose Start is on the wire, so its button cannot be pressed twice.
   let starting = $state<number | null>(null);
+  // Owner, 2026-11-12: a stored tick or mask does nothing until a scan. Set by
+  // every change this window stores, cleared when a scan runs (from anywhere).
+  // shortcut: lives in this window only; closing it forgets the reminder, not the change.
+  let unapplied = $state(false);
+  let applying = $state(false);
   // The root the `−` acts on, by id AND path: `watched_root.id` is a rowid
   // alias SQLite hands out again, so an id alone could select another folder.
   let chosen = $state<{ rootId: number; path: string } | null>(null);
@@ -193,7 +198,7 @@
   type Pending =
     // `all` waits on the same identity check as `include` and reads its words.
     | { kind: 'checking'; path: string; of: 'exclude' | 'include' | 'all' }
-    | { kind: 'exclude'; path: string; paths: number; documents: number }
+    | { kind: 'exclude'; path: string; paths: number }
     // `heldBelow` is carried, not looked up when the question is drawn, for
     // the same reason `paths`/`documents` are: the question states what was
     // true when it was asked. It answers whether removing THIS rule still
@@ -489,37 +494,12 @@
   }
 
 
-  // The two numbers, from ONE `list_tree` reply, and they are about different
-  // things.
-  //
-  // `paths` is this root's own: a relative path means nothing outside the root
-  // it belongs to.
-  //
-  // `documents` is over EVERY root in the reply, and reading the whole reply is
-  // the entire reason it is re-read rather than sampled. A document survives
-  // while any path still names it — `forget_if_unnamed` deletes it only when
-  // its last path goes, and `deleting_one_copy_keeps_the_document` pins that —
-  // so a second copy keeps it findable whether that copy sits in another folder
-  // of this root or under a different watched folder altogether. Counting paths
-  // and calling them documents overstates the loss; counting within one root
-  // overstates it in the same direction.
+  // This root's indexed paths under `prefix`, from ONE `list_tree` reply: a
+  // relative path means nothing outside the root it belongs to.
   function costOf(listing: TreeListing, rootId: number, prefix: string) {
-    const doomed = new Set<string>();
-    const elsewhere = new Set<string>();
-    let paths = 0;
-    for (const root of listing.roots) {
-      for (const treeFile of root.files) {
-        if (root.rootId === rootId && covers(treeFile.relativePath, prefix)) {
-          paths += 1;
-          doomed.add(treeFile.documentId);
-        } else {
-          elsewhere.add(treeFile.documentId);
-        }
-      }
-    }
-    let documents = 0;
-    for (const documentId of doomed) if (!elsewhere.has(documentId)) documents += 1;
-    return { paths, documents };
+    const root = listing.roots.find((r) => r.rootId === rootId);
+    const paths = root?.files.filter((f) => covers(f.relativePath, prefix)).length ?? 0;
+    return { paths };
   }
 
   // ── PR 8a, fix round 5: an answer about a root is about THAT root ─────────
@@ -586,7 +566,7 @@
   // 🔴 The re-read is not a nicety: a count taken from the listing this window
   // already holds is a number about a moment that has passed — a job may have
   // added or removed paths since the row was drawn.
-  async function askExclude(rootId: number, path: string) {
+  async function askExclude(rootId: number, path: string, isDir = true) {
     // Captured before the await, and only the fields that may be: `rootPath` is
     // written once at `toggleRoot` and never patched, so it cannot have moved
     // underneath. A row shut and reopened under the same id during the await is
@@ -628,8 +608,9 @@
     }
     const cost = costOf(listing, rootId, path);
     // No question over nothing: a confirmation a person can always click
-    // through is training for the one that matters.
-    if (cost.paths === 0) {
+    // through is training for the one that matters. Nor over one file (owner,
+    // 2026-11-12): ticking it back and scanning puts it back.
+    if (cost.paths === 0 || !isDir) {
       patch(rootId, { pending: null });
       await exclude(rootId, path);
       return;
@@ -793,6 +774,7 @@
       // One `set_tick`: a fold-back, if the folder empties, lands in the same
       // transaction (`ticks.rs`).
       await setTick(rootId, path, 'off');
+      unapplied = true;
     } catch (e) {
       patch(rootId, { actionError: message(e) });
     }
@@ -812,6 +794,7 @@
       // One `set_tick`: a push-down is decided and written by the shell in one
       // transaction, never as several calls from here (spec C).
       const change = await setTick(rootId, path, tick);
+      unapplied = true;
       // All four sets: a tick that only stores or drops an include changed
       // something too (PR #102 review).
       patch(rootId, {
@@ -1071,6 +1054,7 @@
     let first = true;
     return masksVersion.subscribe(() => {
       if (first) { first = false; return; }
+      unapplied = true;
       for (const id of Object.keys(panels).map(Number)) {
         const panel = panels[id];
         if (panel !== undefined) void read(id, openPathsOf(panel.tree));
@@ -1145,6 +1129,7 @@
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;
       seen = scan.snapshot;
+      if (scan.snapshot.kind === 'running') unapplied = false;
       if (scan.readSeq > seenReadSeq) {
         seenReadSeq = scan.readSeq;
         reread(true);
@@ -1590,7 +1575,7 @@
             : t('settings_folders_confirm_include_heading', { path }),
       cost:
         pending.kind === 'exclude'
-          ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
+          ? t('settings_folders_exclude_cost', { paths: pending.paths })
           // First: a push-down row is held from above by definition, and what
           // its tick does is take that rule away — the sentence below would
           // say the opposite.
@@ -1691,6 +1676,16 @@
   };
   const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_folders_remove_selected'); });
   const treeHintLabel = $derived.by(() => { void $locale; return t('settings_folders_tree_hint'); });
+  const applyLabel = $derived.by(() => { void $locale; return t('settings_folders_apply'); });
+
+  async function applyChanges() {
+    applying = true;
+    try {
+      await jobs.scan('full');
+    } finally {
+      applying = false;
+    }
+  }
   // 🔴 PR 8a, fix round 5. Words derived from the boolean `rootChanged` holds,
   // under `void $locale` like every other sentence on this screen.
   const rootChangedLabel = $derived.by(() => {
@@ -1757,7 +1752,7 @@
                 e.currentTarget.indeterminate = row.mixed;
                 // A mixed box ticks everything inside (spec, rule 4).
                 if (row.control === 'exclude' && row.mixed) askAll(rootId, row.entry.relativePath);
-                else if (row.control === 'exclude') askExclude(rootId, row.entry.relativePath);
+                else if (row.control === 'exclude') askExclude(rootId, row.entry.relativePath, row.entry.isDir);
                 else askInclude(
                   rootId, row.entry.relativePath,
                   row.entry.state.kind === 'excludedByAncestor',
@@ -2006,4 +2001,13 @@
     </div>
   </div>
   <p class="hint">{treeHintLabel}</p>
+  {#if unapplied}
+    <div class="apply">
+      <button
+        type="button"
+        data-testid="folders-apply"
+        disabled={applying || scanRunning}
+        onclick={applyChanges}>{applyLabel}</button>
+    </div>
+  {/if}
 </div>

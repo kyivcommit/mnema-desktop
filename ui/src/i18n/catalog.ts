@@ -7,7 +7,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
-  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint'
+  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint' | 'settings_folders_apply'
   | 'settings_folders_start_named'
   | 'settings_folders_root_all' | 'settings_folders_root_some'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
@@ -222,6 +222,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_add: 'Додати теку',
     settings_folders_remove_selected: 'Видалити виділену теку',
     settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку чи файл. Те, що названо в .gitignore, спочатку без галки — відмітьте, щоб індексувати все одно.',
+    settings_folders_apply: 'Застосувати зміни',
     settings_folders_root_all: 'Усе індексується',
     settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
@@ -642,22 +643,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // список лишається таким, яким був. Твердження про сам перечит було
     // неправдою саме в тому стані, заради якого банер існує.
     settings_folders_folder_changed: 'Ця тека вже не та, що була на екрані: її місце посіла інша. Нічого не змінено.',
-    // 🔴 ДВА числа, і вони про різні речі. `paths` — проіндексовані шляхи під
-    // цим префіксом; `documents` — документи, у яких жодного шляху поза ним не
-    // лишається. Документ живий, доки його називає бодай один шлях
-    // (`forget_if_unnamed`, walk.rs), тож рахувати шляхи й називати їх
-    // документами означає завищити втрату. Гілка `=0` — не порожній випадок:
-    // це стан, у якому індекс втрачає шлях і не втрачає жодного документа, і
-    // сказати про це треба словами, а не нулем.
-    // 🔴 Fix round 2, F4. Обидва числа беруться з читання, обмеженого
-    // `status = 'indexed'` — того самого обмеження, про яке маска-побратим
-    // (`settings_masks_add_cost` нижче) чесно попереджає, а це речення
-    // називало своє число без жодного застереження. Додано одну фразу, за
-    // зразком маски й у тій самій її частині: наступне сканування може забрати
-    // більше, бо файли, які так і не проіндексувалися, тут не враховані.
-    // Підмет інший — тека, не маска, — тож формулювання не переписане
-    // дослівно: «кожної теки» тут не було б правдою.
-    settings_folders_exclude_cost: 'Станом на зараз: при наступному скануванні індекс втратить {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} із цієї теки, а {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}. Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    // Власник, 2026-11-12: один рядок — скільки проіндексованих файлів зникне.
+    settings_folders_exclude_cost: '{paths, plural, one {# файл із цієї теки зникне} few {# файли із цієї теки зникнуть} many {# файлів із цієї теки зникнуть} other {# файла із цієї теки зникне}} з пошуку після наступного сканування.',
     // Зворотний бік — і свідомо БЕЗ числа: це вікно не знає, що лежить на диску
     // в теці, яку досі оминали, і вигадане там число було б тим самим
     // завищенням, тільки в інший бік. Зате наслідок відомий точно (D29): текст
@@ -1279,6 +1266,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_add: 'Add a folder',
     settings_folders_remove_selected: 'Remove the selected folder',
     settings_folders_tree_hint: 'Untick a folder or a file to keep it out of the index. What .gitignore names starts unticked — tick it to index it anyway.',
+    settings_folders_apply: 'Apply changes',
     settings_folders_root_all: 'Everything is indexed',
     settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
@@ -1477,7 +1465,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // it was. The re-read claim was false in the one state this banner exists
     // for.
     settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed.',
-    settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The scan can remove more than that: files that never finished indexing are not counted here.',
+    settings_folders_exclude_cost: '{paths, plural, one {# file} other {# files}} from this folder will disappear from search after the next scan.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
     settings_folders_include_cost_push_down: 'From the next scan on, "{path}" is indexed and its text is sent to the model provider. Everything else in the folders above it stays excluded — but new files added there later are indexed.',
     settings_folders_include_all_cost: 'From the next scan on, everything inside this folder is indexed and its text is sent to the model provider: {count} exclusion rules under it are removed.',

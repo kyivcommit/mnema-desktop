@@ -1563,13 +1563,8 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
 // ---------------------------------------------------------------------------
 // PR 8a, Task 6 — what an exclusion costs, said before it is stored.
 //
-// 🔴 Every fixture below states BOTH numbers in the sentence it asserts. They
-// are two different facts about the same reply — indexed PATHS under the
-// prefix, and DOCUMENTS for which no path outside it survives — and an
-// implementation that counts paths and calls them documents satisfies any
-// assertion that reads only one of them. `deleting_one_copy_keeps_the_document`
-// (`crates/mnema-ingest/tests/walk.rs:1168`) is the behaviour they mirror:
-// `forget_if_unnamed` drops a document when its LAST path goes, never before.
+// Owner, 2026-11-12: one line — how many indexed files leave search. The
+// documents-vs-paths distinction and the "may remove more" caveat are gone.
 // ---------------------------------------------------------------------------
 
 function file(relativePath: string, documentId: string): TreeFile {
@@ -1602,7 +1597,7 @@ const EMPTY_ROOTS = [
   root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
 ];
 
-test('excluding a folder that holds two documents names two paths AND two documents', async () => {
+test('excluding a folder that holds two indexed files asks in one line with the count', async () => {
   await askExclude('drop', EMPTY_ROOTS, [
     root({
       rootId: 1,
@@ -1614,51 +1609,11 @@ test('excluding a folder that holds two documents names two paths AND two docume
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Exclude drop?',
-    'As of now: on the next scan the index loses 2 files from this folder,',
-    'and 2 documents stop being findable: no other path names them.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
+    '2 files from this folder will disappear from search after the next scan.',
     'Confirm Cancel',
   ].join(' '));
   // The question is a question: nothing is stored while it is on screen.
   expect(excludeSubfolder).not.toHaveBeenCalled();
-});
-
-// 🔴 The state that tells the two numbers apart. One `documentId`, two paths,
-// one of them outside the prefix: the index loses a path and loses no document.
-test('a second copy inside the same root keeps the document, so the count is one path and zero documents', async () => {
-  await askExclude('drop', EMPTY_ROOTS, [
-    root({
-      rootId: 1,
-      absolutePath: '/synthetic/root',
-      files: [file('drop/x.md', 'doc-1'), file('keep/copy.md', 'doc-1')],
-    }),
-    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
-  ]);
-
-  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
-    'Exclude drop?',
-    'As of now: on the next scan the index loses 1 file from this folder,',
-    'and no document stops being findable — each is also indexed under another path.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
-    'Confirm Cancel',
-  ].join(' '));
-});
-
-// 🔴 The same fact across a root boundary. A count taken per root sees only
-// `/synthetic/root`, finds the document's last path there, and overstates.
-test('a second copy under a DIFFERENT watched folder keeps the document too', async () => {
-  await askExclude('drop', EMPTY_ROOTS, [
-    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
-    root({ rootId: 2, absolutePath: '/synthetic/other', files: [file('other/x.md', 'doc-1')] }),
-  ]);
-
-  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
-    'Exclude drop?',
-    'As of now: on the next scan the index loses 1 file from this folder,',
-    'and no document stops being findable — each is also indexed under another path.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
-    'Confirm Cancel',
-  ].join(' '));
 });
 
 // ---------------------------------------------------------------------------
@@ -1705,9 +1660,7 @@ test('a sibling whose name merely starts with the prefix is not counted', async 
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Exclude drop?',
-    'As of now: on the next scan the index loses 1 file from this folder,',
-    'and 1 document stops being findable: no other path names it.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
+    '1 file from this folder will disappear from search after the next scan.',
     'Confirm Cancel',
   ].join(' '));
 });
@@ -1929,9 +1882,7 @@ test('a question already on screen switches language with everything else', asyn
 
   expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
     'Виключити drop?',
-    'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки,',
-    'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.',
-    'Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    '2 файли із цієї теки зникнуть з пошуку після наступного сканування.',
     'Підтвердити Скасувати',
   ].join(' '));
   // The two aria-labels `visibleText` cannot see: `confirmAriaLabel` and
@@ -1975,9 +1926,7 @@ test('the wait for the fresh reply says what is being checked', async () => {
   release(listing([root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] })]));
   await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
     'Exclude drop?',
-    'As of now: on the next scan the index loses 1 file from this folder,',
-    'and 1 document stops being findable: no other path names it.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
+    '1 file from this folder will disappear from search after the next scan.',
     'Confirm Cancel',
   ].join(' ')));
 });
@@ -2629,9 +2578,7 @@ test('an exclude question is asked as before when this folder\'s id and path sti
 
   expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
     'Exclude Work?',
-    'As of now: on the next scan the index loses 2 files from this folder,',
-    'and 2 documents stop being findable: no other path names them.',
-    'The scan can remove more than that: files that never finished indexing are not counted here.',
+    '2 files from this folder will disappear from search after the next scan.',
     'Confirm Cancel',
   ].join(' '));
   expect(screen.queryByTestId('folders-root-changed')).toBeNull();
@@ -3719,35 +3666,19 @@ test('files are listed with a tick and no chevron', async () => {
   expect(screen.getByTestId('subfolder-expand-1-a')).toBeTruthy();
 });
 
-// Review Focus 1: a rule on a file removes the file itself, so the count is
-// not zero and the question is asked — never the silent zero-cost shortcut.
-test('unticking an indexed file asks with its own count', async () => {
+// Owner, 2026-11-12: one file is cheap to take out and as cheap to put back
+// (tick it, scan), so unticking it stores at once — no question.
+test('unticking an indexed file stores it at once, with no question', async () => {
   await expand([fileRow('b.pdf')], [], 0, [file('b.pdf', 'doc-b'), file('b.pdfx', 'doc-x')]);
   setTick.mockReset();
+  setTick.mockResolvedValue({ added: ['b.pdf'], removed: [], included: [], unincluded: [] });
 
   await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
 
-  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
-  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
-    t('settings_folders_exclude_cost', { paths: 1, documents: 1 }),
-  );
-  expect(setTick).not.toHaveBeenCalled();
-});
-
-test('confirming sends one off for the file and nothing else', async () => {
-  await expand([fileRow('b.pdf')], [], 0, [file('b.pdf', 'doc-b')]);
-  setTick.mockReset();
-  setTick.mockResolvedValue({ added: ['b.pdf'], removed: [] });
-
-  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
-  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
-  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
-    name: t('settings_folders_confirm_exclude_named', { path: 'b.pdf' }),
-  }));
-
-  await waitFor(() => expect(setTick).toHaveBeenCalledTimes(1));
-  expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'off');
+  await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'off'));
+  expect(setTick).toHaveBeenCalledTimes(1);
   expect(excludeSubfolder).not.toHaveBeenCalled();
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
 });
 
 test('ticking under an excluded folder asks about new files and sends one on', async () => {
@@ -4103,4 +4034,57 @@ test('a root whose top level holds a gitignored row is marked – with no rule o
   await waitFor(() => expect(mark(2).textContent).toBe('✓'));
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   expect(mark(1).textContent).toBe('–');
+});
+
+// Owner, 2026-11-12: a stored change does nothing until a scan, and nothing on
+// screen said so. "Apply changes" appears after one, starts a full scan, and
+// goes once a scan is running.
+async function untickFileWatching(reply: Promise<unknown>) {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('b.pdf', 'doc-b')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([fileRow('b.pdf')]));
+  listExclusions.mockResolvedValue([]);
+  setTick.mockReset();
+  setTick.mockReturnValue(reply);
+  renderWatching();
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index b.pdf' })).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull();
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
+  await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'off'));
+}
+
+test('a stored change offers Apply changes, which starts a full scan and goes once it runs', async () => {
+  await untickFileWatching(Promise.resolve({ added: ['b.pdf'], removed: [], included: [], unincluded: [] }));
+
+  const apply = await screen.findByRole('button', { name: 'Apply changes' });
+  invoke.mockClear();
+  await fireEvent.click(apply);
+  expect(invoke).toHaveBeenCalledWith('start_scan_job', { entry: 'full' });
+
+  await runEmbeddingAt(0);
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull());
+});
+
+test('a refused change offers no Apply changes', async () => {
+  await untickFileWatching(Promise.reject(new Error('the index is not open')));
+
+  await waitFor(() =>
+    expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
+  expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull();
+});
+
+test('a stored mask offers Apply changes too, in the language on screen', async () => {
+  setLocale('uk');
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  renderWatching();
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  expect(screen.queryByTestId('folders-apply')).toBeNull();
+
+  masksVersion.update((n) => n + 1);
+
+  expect((await screen.findByTestId('folders-apply')).textContent).toBe('Застосувати зміни');
 });
