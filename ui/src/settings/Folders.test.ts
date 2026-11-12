@@ -777,13 +777,6 @@ test('built-in and symlinked subfolders are not listed, an open one beside them 
   expect(screen.getByTestId('subfolder-1-Work')).toBeTruthy();
 });
 
-// A folder that really has no subfolders keeps its own sentence.
-test('a folder with no subfolders at all says so', async () => {
-  await expand([]);
-
-  expect(screen.getByText('This folder is empty.')).toBeTruthy();
-});
-
 // The `–` is read off the stored rules, so a collapsed folder says it too, and
 // a rule whose folder is gone excludes nothing and must not make it.
 test('a folder with a rule deeper down shows a mixed tick while collapsed', async () => {
@@ -869,12 +862,6 @@ test('a zero unnameable count states nothing at all', async () => {
 
   expect(screen.queryByText(/are not listed/)).toBeNull();
   expect(screen.queryByText(/is not listed/)).toBeNull();
-});
-
-test('a folder with no subfolders says so rather than showing an empty space', async () => {
-  await expand([]);
-
-  expect(screen.getByText('This folder is empty.')).toBeTruthy();
 });
 
 // The tooltip of a row held from above names the OUTERMOST rule (`tree.rs`'s
@@ -3653,13 +3640,15 @@ test('a failed re-read takes Start and the per-root questions off the screen wit
   expect(screen.queryByTestId('folders-apply')).toBeNull();
 });
 
-// PR #100 review 4. Built-in folders and symlinks are hidden, so a folder that
-// holds only those must not claim to hold no subfolders at all.
-test('a folder holding only hidden subfolders says nothing here can be indexed, not that it is empty', async () => {
+// Owner, 2026-11-12: an open folder with nothing to show shows nothing — no
+// "This folder is empty", no "Nothing here can be indexed". The open chevron
+// with no rows under it says it already.
+test('an open folder with no rows to show draws no sentence', async () => {
+  await expand([]);
+  expect(visibleText(screen.getByTestId('folder-panel-1'))).toBe('');
+  cleanup();
   await expand([sub('node_modules', { kind: 'builtIn' }), sub('Link', { kind: 'symlink' })]);
-
-  expect(screen.queryByText('This folder is empty.')).toBeNull();
-  expect(screen.getByText('Nothing here can be indexed: the scan never reads what this folder holds.')).toBeTruthy();
+  expect(visibleText(screen.getByTestId('folder-panel-1'))).toBe('');
 });
 
 // ── Folders tree PR 2: files, marks, and one set_tick per tick ──────────────

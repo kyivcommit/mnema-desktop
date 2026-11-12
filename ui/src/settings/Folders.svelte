@@ -1456,7 +1456,7 @@
     open: boolean;
     children: Level | null;
   };
-  type Level = { unnameableLabel: string | null; emptyLabel: string | null; rows: SubRow[] };
+  type Level = { unnameableLabel: string | null; rows: SubRow[] };
 
   // `rules` is threaded down the whole recursion rather than read from the
   // panel at each level, because it is one fact about one panel and a second
@@ -1507,16 +1507,8 @@
         node.listing.unnameable > 0
           ? t('settings_subfolders_unnameable', { count: node.listing.unnameable })
           : null,
-      // Only when there is genuinely nothing: a folder holding entries this
-      // listing cannot name says how many instead, and must not also claim to
-      // hold no subfolders.
-      // Two sentences, because hiding built-in folders and symlinks makes "no
-      // rows" mean two things: really nothing here, or only folders the scan
-      // never reads. The first would be false about the second.
-      emptyLabel:
-        rows.length > 0 || node.listing.unnameable > 0 ? null
-        : node.listing.entries.length === 0 ? t('settings_subfolders_none')
-        : t('settings_subfolders_none_indexable'),
+      // Owner, 2026-11-12: nothing to show draws nothing — the open chevron
+      // with no rows under it says so.
       rows,
     };
   }
@@ -1716,7 +1708,6 @@
 
 {#snippet subfolders(level: Level, rootId: number)}
   {#if level.unnameableLabel}<p class="tnote">{level.unnameableLabel}</p>{/if}
-  {#if level.emptyLabel}<p class="tnote">{level.emptyLabel}</p>{/if}
   <ul>
     {#each level.rows as row (row.entry.relativePath)}
       <li class="sub" class:excl={row.excluded} data-testid={`subfolder-${rootId}-${row.entry.relativePath}`}>

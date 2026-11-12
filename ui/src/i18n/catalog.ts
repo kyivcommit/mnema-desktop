@@ -67,7 +67,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
   | 'settings_folders_expand_named'
-  | 'settings_subfolders_loading' | 'settings_subfolders_none' | 'settings_subfolders_none_indexable'
+  | 'settings_subfolders_loading'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
   | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
@@ -553,8 +553,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces.
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
-    settings_subfolders_none: 'У цій теці нічого немає.',
-    settings_subfolders_none_indexable: 'Тут нічого індексувати: сканування ніколи не читає того, що лежить у цій теці.',
     // `unnameable` (tree.rs): записи (теки й файли), чиї назви не є коректним
     // UTF-8, лічать і не показують — назва, зіпсована при показі, більше не
     // відкриває той запис, з якого походить, і правило з неї не виключило б
@@ -1377,8 +1375,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_days: '{count, plural, one {# day} other {# days}} ago',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
-    settings_subfolders_none: 'This folder is empty.',
-    settings_subfolders_none_indexable: 'Nothing here can be indexed: the scan never reads what this folder holds.',
     settings_subfolders_unnameable: '{count, plural, one {# item is not listed: its name could not be read as text.} other {# items are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
