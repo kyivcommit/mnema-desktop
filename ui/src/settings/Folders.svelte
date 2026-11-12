@@ -1413,6 +1413,14 @@
     }
   }
 
+  // Owner, 2026-11-12: roots under one long parent differ only at the end, so
+  // the row cuts at the start (`dir="rtl"`) and the home folder reads `~`.
+  // shortcut: home is guessed from `/Users/<name>` or `/home/<name>`; ask the
+  // shell for it if a root ever lives in a home elsewhere.
+  function shortPath(path: string): string {
+    return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
+  }
+
   type SubRow = {
     entry: Subfolder;
     sentence: string;
@@ -1819,7 +1827,7 @@
                   data-testid={`folder-select-${root.rootId}`}
                   aria-pressed={selected}
                   title={root.absolutePath}
-                  onclick={() => selectRoot(root)}><span class="fp">{root.absolutePath}</span></button>
+                  onclick={() => selectRoot(root)}><span class="fp" dir="rtl"><bdi dir="ltr">{shortPath(root.absolutePath)}</bdi></span></button>
                 <span class="tags">
                   {#if removing === root.rootId}
                     <span class="tag" data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>

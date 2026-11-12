@@ -562,6 +562,8 @@ main select:focus-visible {
 
 /* a folder waiting for its Start (D202): the path takes the pending colour */
 .trow.unconfirmed .fp { color: var(--pending); }
+/* cut at the start, read left to right (Folders.svelte `shortPath`) */
+.fp[dir="rtl"] { text-align: left; }
 
 .ttree button.chevb,
 .ttree span.chevb {

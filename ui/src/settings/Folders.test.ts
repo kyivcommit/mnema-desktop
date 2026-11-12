@@ -4104,3 +4104,25 @@ test('re-ticking an excluded folder or a gitignored file still asks', async () =
   await screen.findByTestId('folder-confirm-1');
   expect(setTick).not.toHaveBeenCalled();
 });
+
+// Owner, 2026-11-12: two roots under one long parent read the same when the
+// path is cut at its END. The row cuts at the START (`dir="rtl"` on the box,
+// the path itself left-to-right inside), and the home folder reads `~`. The
+// full path stays in the tooltip.
+test('a long root path keeps its end in view, with the home folder as ~', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/Books' }),
+    root({ rootId: 2, absolutePath: '/home/someone/notes' }),
+    root({ rootId: 3, absolutePath: '/srv/library' }),
+  ]));
+  render(Folders, { props: { jobs: createJobController() } });
+
+  const books = await screen.findByText('~/Library/Mobile Documents/com~apple~CloudDocs/Books');
+  expect(books.closest('[dir="rtl"]')).not.toBeNull();
+  expect(books.getAttribute('dir')).toBe('ltr');
+  expect(screen.getByTestId('folder-select-1').getAttribute('title'))
+    .toBe('/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/Books');
+  expect(screen.getByText('~/notes')).toBeTruthy();
+  expect(screen.getByText('/srv/library')).toBeTruthy();
+});
