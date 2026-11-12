@@ -1561,11 +1561,12 @@
             : null,
         mixed: control === 'exclude' && (
           heldBelow(rules, entry.relativePath)
-          // Not a `.gitignore` row below (final review, Important 3): a mixed
-          // click ticks everything inside, so the folder's own exclusion would
-          // go through "index what .gitignore names" first, and a collapsed
-          // folder could not know it anyway. The row itself shows its state.
           || entry.state.kind === 'gitIgnoredOpen'
+          // What `.gitignore` names is as if the person had unticked it
+          // (owner's ruling 2026-11-12), so its folder is `–`, as for a rule.
+          // A LOADED level only: a collapsed folder cannot know what
+          // `.gitignore` holds below it without a walk per row.
+          || (child !== undefined && child.listing.entries.some((e) => e.state.kind === 'gitIgnored'))
         ),
         tag: control === 'none' ? sentence : gitTag(entry),
         mark:
