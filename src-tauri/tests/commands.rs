@@ -392,6 +392,8 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "exclude_subfolder",
         "include_subfolder",
         "list_subfolders",
+        "set_tick",
+        "preview_tick",
         // PR 9 Task 2. 🔴 These three are `(async)` for a reason that is not
         // performance: `GlobalShortcut::register` and `unregister` post a
         // closure with `run_on_main_thread` and then block on `rx.recv()`
@@ -15065,7 +15067,7 @@ fn set_tick_pushes_down_and_the_next_walk_indexes_only_the_ticked_file() {
     .expect("set_tick was rejected");
     assert_eq!(
         change,
-        json!({ "added": ["a/c.txt", "a/d"], "removed": ["a"] }),
+        json!({ "added": ["a/c.txt", "a/d"], "removed": ["a"], "included": [], "unincluded": [] }),
         "{change}"
     );
 
@@ -15150,7 +15152,7 @@ fn set_tick_on_removes_a_rule_the_validator_now_refuses() {
 
     assert_eq!(
         change,
-        json!({ "added": [], "removed": ["old "] }),
+        json!({ "added": [], "removed": ["old "], "included": [], "unincluded": [] }),
         "{change}"
     );
     let left = app
@@ -15158,4 +15160,292 @@ fn set_tick_on_removes_a_rule_the_validator_now_refuses() {
         .with_index(|db| db.list_path_exclusions(root))
         .unwrap();
     assert!(left.is_empty(), "{left:?}");
+}
+
+// ── Folders tree PR 3: `.gitignore` in the listing and the scan ────────────
+
+fn include(app: &tauri::App<MockRuntime>, root: i64, paths: &[&str]) {
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.change_path_rules(
+                root,
+                &mnema_index::PathRuleChange {
+                    included_added: paths.iter().map(|p| p.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        })
+        .expect("storing the include");
+}
+
+fn listing_of(webview: &WebviewWindow<MockRuntime>, root: i64, path: &str) -> Value {
+    call(
+        webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": path }),
+    )
+    .expect("list_subfolders was rejected")
+}
+
+fn state_of(listing: &Value, relative_path: &str) -> Value {
+    listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["relativePath"] == relative_path)
+        .unwrap_or_else(|| panic!("no row {relative_path}: {listing}"))["state"]
+        .clone()
+}
+
+#[test]
+fn a_row_gitignore_names_is_gitignored_and_its_children_inherit_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("build")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/a.txt"), "x").unwrap();
+    std::fs::write(fixture.path().join("kept.txt"), "x").unwrap();
+    let root = root_for(&webview, fixture.path());
+
+    let top = listing_of(&webview, root, "");
+    assert_eq!(
+        state_of(&top, "build"),
+        json!({ "kind": "gitIgnored", "by": "build" }),
+        "{top}"
+    );
+    assert_eq!(
+        state_of(&top, "kept.txt"),
+        json!({ "kind": "open" }),
+        "{top}"
+    );
+    let inside = listing_of(&webview, root, "build");
+    assert_eq!(
+        state_of(&inside, "build/a.txt"),
+        json!({ "kind": "gitIgnored", "by": "build" }),
+        "{inside}"
+    );
+}
+
+#[test]
+fn info_exclude_alone_marks_the_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join(".git/info")).unwrap();
+    std::fs::write(fixture.path().join(".git/info/exclude"), "secret.txt\n").unwrap();
+    std::fs::write(fixture.path().join("secret.txt"), "x").unwrap();
+    let root = root_for(&webview, fixture.path());
+
+    let top = listing_of(&webview, root, "");
+    assert_eq!(
+        state_of(&top, "secret.txt"),
+        json!({ "kind": "gitIgnored", "by": "secret.txt" }),
+        "{top}"
+    );
+}
+
+#[test]
+fn an_include_shows_on_its_path_and_opens_its_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("build/x")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/x/keep.txt"), "x").unwrap();
+    std::fs::write(fixture.path().join("build/x/other.txt"), "x").unwrap();
+    let root = root_for(&webview, fixture.path());
+    include(&app, root, &["build/x/keep.txt"]);
+
+    let top = listing_of(&webview, root, "");
+    assert_eq!(
+        state_of(&top, "build"),
+        json!({ "kind": "gitIgnoredOpen", "by": "build" }),
+        "{top}"
+    );
+    let x = listing_of(&webview, root, "build/x");
+    assert_eq!(
+        state_of(&x, "build/x/keep.txt"),
+        json!({ "kind": "gitIncluded", "include": "build/x/keep.txt" }),
+        "{x}"
+    );
+    assert_eq!(
+        state_of(&x, "build/x/other.txt"),
+        json!({ "kind": "gitIgnored", "by": "build" }),
+        "{x}"
+    );
+}
+
+#[test]
+fn a_user_rule_is_shown_before_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("build")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    let root = root_for(&webview, fixture.path());
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "build" }),
+    )
+    .expect("excluding build was rejected");
+
+    let top = listing_of(&webview, root, "");
+    assert_eq!(
+        state_of(&top, "build"),
+        json!({ "kind": "excluded" }),
+        "{top}"
+    );
+}
+
+#[test]
+fn a_failure_under_gitignore_is_not_shown_or_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("build")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/a.pdf"), "x").unwrap();
+    std::fs::write(fixture.path().join("b.pdf"), "x").unwrap();
+    let root = root_for(&webview, fixture.path());
+    record_failure(
+        dir.path(),
+        root,
+        "build/a.pdf",
+        mnema_index::SkipRule::Crash,
+    );
+    record_failure(dir.path(), root, "b.pdf", mnema_index::SkipRule::Crash);
+
+    let top = listing_of(&webview, root, "");
+    let build = top["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["relativePath"] == "build")
+        .unwrap()
+        .clone();
+    assert_eq!(build["failedBelow"], json!(0), "{top}");
+    let inside = listing_of(&webview, root, "build");
+    assert!(inside["entries"][0]["failure"].is_null(), "{inside}");
+    let tree = call(&webview, "list_tree", json!({})).unwrap();
+    assert_eq!(tree["roots"][0]["failed"], json!(1), "{tree}");
+}
+
+/// On the BODY of the scan: the include reaches the walk, and only its path.
+#[test]
+fn the_scan_indexes_an_included_file_and_nothing_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("build/x")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/x/keep.txt"), "kept text").unwrap();
+    std::fs::write(fixture.path().join("build/x/other.txt"), "other text").unwrap();
+    let root = root_for(&webview, fixture.path());
+    include(&app, root, &["build/x/keep.txt"]);
+
+    scan_to_completion(app.handle());
+    let paths = indexed_paths(&app, root);
+    assert!(paths.contains(&"build/x/keep.txt".to_string()), "{paths:?}");
+    assert!(
+        !paths.contains(&"build/x/other.txt".to_string()),
+        "{paths:?}"
+    );
+}
+
+// ── Folders tree PR 3: set_tick with includes, preview_tick ────────────────
+
+fn rules_of(app: &tauri::App<MockRuntime>, root: i64) -> (Vec<String>, Vec<String>) {
+    app.state::<AppState>()
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>((
+                db.list_path_exclusions(root)?,
+                db.list_gitignore_includes(root)?,
+            ))
+        })
+        .unwrap()
+}
+
+/// A folder `.gitignore` names AND the person excluded, with two files.
+fn gitignored_and_excluded(webview: &WebviewWindow<MockRuntime>) -> (tempfile::TempDir, i64) {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("build")).unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(fixture.path().join("build/x.txt"), "the ticked file").unwrap();
+    std::fs::write(fixture.path().join("build/y.txt"), "a sibling").unwrap();
+    let root = root_for(webview, fixture.path());
+    call(
+        webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "build" }),
+    )
+    .expect("excluding build was rejected");
+    (fixture, root)
+}
+
+#[test]
+fn preview_tick_writes_nothing_and_answers_what_set_tick_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let (_fixture, root) = gitignored_and_excluded(&webview);
+    let before = rules_of(&app, root);
+    let args = json!({ "rootId": root, "relativePath": "build/x.txt", "tick": "on" });
+
+    let preview = call(&webview, "preview_tick", args.clone()).expect("preview_tick was rejected");
+    assert_eq!(
+        rules_of(&app, root),
+        before,
+        "preview_tick wrote: {preview}"
+    );
+
+    let written = call(&webview, "set_tick", args).expect("set_tick was rejected");
+    assert_eq!(preview, written);
+}
+
+/// One press under a rule AND `.gitignore`: the rule pushed down, the include
+/// stored, both in one write — and the next scan indexes only the ticked file.
+#[test]
+fn set_tick_writes_exclusions_and_includes_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let (_fixture, root) = gitignored_and_excluded(&webview);
+
+    let change = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "build/x.txt", "tick": "on" }),
+    )
+    .expect("set_tick was rejected");
+    assert_eq!(
+        change,
+        json!({
+            "added": ["build/y.txt"],
+            "removed": ["build"],
+            "included": ["build/x.txt"],
+            "unincluded": []
+        }),
+        "{change}"
+    );
+    assert_eq!(
+        rules_of(&app, root),
+        (
+            vec!["build/y.txt".to_string()],
+            vec!["build/x.txt".to_string()]
+        )
+    );
+
+    scan_to_completion(app.handle());
+    // `.gitignore` itself is an ordinary text file and is indexed too.
+    let paths = indexed_paths(&app, root);
+    assert!(paths.contains(&"build/x.txt".to_string()), "{paths:?}");
+    assert!(!paths.contains(&"build/y.txt".to_string()), "{paths:?}");
 }

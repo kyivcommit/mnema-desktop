@@ -105,11 +105,12 @@ fn every_foreign_key_names_a_table_and_column_that_exist() {
             );
         }
     }
-    // 22 is what the schema declares, and it is not the number of `REFERENCES`
+    // 23 is what the schema declares, and it is not the number of `REFERENCES`
     // lines: `PRAGMA foreign_key_list` reports one row per FK *column*, so the
     // two composite keys — block→page and chunk→block, each on
-    // `(id, document_id)` — contribute two rows apiece. 20 clauses, 22 rows;
-    // the 20th is `search_folder.watched_root_id` (migration 6). The floor must
+    // `(id, document_id)` — contribute two rows apiece. 21 clauses, 23 rows;
+    // the 20th is `search_folder.watched_root_id` (migration 6), the 21st
+    // `gitignore_include.watched_root_id` (migration 10, D202 PR 3). The floor must
     // equal the count: one below it lets any single constraint go unnoticed.
     // The number was obtained by running this loop, not by counting the DDL.
     //
@@ -122,7 +123,7 @@ fn every_foreign_key_names_a_table_and_column_that_exist() {
     // in `chunk_fts` for ever, so lexical search answers with an id whose
     // `citation()` is `None`. All five are in scripts/mutations/branch-review.sh.
     assert!(
-        checked >= 22,
+        checked >= 23,
         "only {checked} foreign keys found — constraints have gone missing"
     );
 }

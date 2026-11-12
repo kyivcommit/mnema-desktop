@@ -121,8 +121,8 @@ export type HistoryOpen =
 // undescribed.
 //
 // What each one means for a person, since the words on screen come from it:
-//   - `open` — no rule this command can see. NOT a promise the folder is
-//     indexed; only that no rule excludes it.
+//   - `open` — no rule of the person's, no `.gitignore` and no built-in layer
+//     holds it (since PR 3 the listing asks the walk's own `.gitignore` layer).
 //   - `excluded` — a stored rule names this folder itself.
 //   - `excludedByAncestor` — a stored rule names an ancestor, and carries
 //     WHICH one: a row that says "held by a rule" without naming it leaves the
@@ -147,7 +147,17 @@ export type SubfolderState =
   | { kind: 'masked'; mask: string }
   // A file the last scan recorded as a format this product does not read
   // (`unsupported`, `not_text`). Not drawn.
-  | { kind: 'notRead' };
+  | { kind: 'notRead' }
+  // Folders tree PR 3 (D202). The in-tree `.gitignore` holds the row; `by` is
+  // the topmost path on its chain a `.gitignore` names (the row itself or a
+  // folder above it). An empty tick: ticking stores an include.
+  | { kind: 'gitIgnored'; by: string }
+  // Held as above, but an include lies below this folder: the walk goes in and
+  // keeps only the included paths. A mixed tick.
+  | { kind: 'gitIgnoredOpen'; by: string }
+  // `.gitignore` would hold it and the include `include` (the row itself or a
+  // folder above it) lifts it: indexed, a ticked box.
+  | { kind: 'gitIncluded'; include: string };
 
 // `relativePath` is what goes back to `exclude_subfolder`, never `name`: the
 // two differ at every level below the root, and a rule built from the name
@@ -191,9 +201,14 @@ export const includeSubfolder = (rootId: number, relativePath: string) =>
 // push-down, a fold-back or "tick everything inside" is decided and written by
 // the shell in one transaction, never as several calls from here.
 export type Tick = 'off' | 'on' | 'all';
-export type RuleChange = { added: string[]; removed: string[] };
+// `added`/`removed` are exclusions; `included`/`unincluded` are includes past
+// `.gitignore` (folders tree PR 3).
+export type RuleChange = { added: string[]; removed: string[]; included: string[]; unincluded: string[] };
 export const setTick = (rootId: number, relativePath: string, tick: Tick) =>
   invoke<RuleChange>('set_tick', { rootId, relativePath, tick });
+// What `setTick` would change, written nowhere: a question names its cost.
+export const previewTick = (rootId: number, relativePath: string, tick: Tick) =>
+  invoke<RuleChange>('preview_tick', { rootId, relativePath, tick });
 
 // What `pattern` would remove, counted over the INDEX by the walk's own
 // matcher (`tree.rs`). The window has no glob library and must not grow one: a

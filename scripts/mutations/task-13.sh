@@ -26,14 +26,15 @@ case_ "enumerate: the walker's per-directory sort is not the whole ordering" \
   '// walked.found.sort_by' \
   mnema-walk 'the_walk_is_ordered_by_relative_path' --test enumerate
 
-# `require_git` defaults to TRUE in the `ignore` crate, and left alone it
-# makes `.gitignore` apply only inside an actual git repository — silently,
-# since nothing here counts a rule that quietly stopped matching. A watched
-# folder is normally not a repository.
+# `.gitignore` must apply in a folder that is not a git repository — a watched
+# folder normally is not one. Until D202 PR 3 the walker read `.gitignore` and
+# this was `require_git(false)`; now the crate's own layer reads it
+# (`crates/mnema-walk/src/gitignore.rs`), so the mutant is the layer reading a
+# folder's `.gitignore` only when a `.git` sits beside it.
 case_ "rules: gitignore must apply outside a git repository" \
-  crates/mnema-walk/src/rules.rs \
-  's{\.require_git\(false\)}{// .require_git(false) removed}' \
-  '// .require_git(false) removed' \
+  crates/mnema-walk/src/gitignore.rs \
+  's{let gitignore = self\.compile\(&abs, &abs\.join\("\.gitignore"\)\);}{let gitignore = if abs.join(".git").exists() { self.compile(&abs, &abs.join(".gitignore")) } else { Gitignore::empty() };}' \
+  'if abs.join(".git").exists() { self.compile' \
   mnema-walk 'gitignore_applies_in_a_folder_that_is_not_a_repository' --test rules
 
 # `record_skip`'s `ON CONFLICT` target has to name the schema's unique index

@@ -38,7 +38,7 @@ case_ "schema.sql is frozen at migration 1 and must not grow these columns" \
 # leaves that third migration immediately behind it. Staleness debt from
 # that commit, not from this case's own subject. Marker extended for the
 # query-history migration, which is appended after `ADD_FILE_MASK`, and again for the search-folder one
-# and for `ADD_PAGE_OCR_CONFIDENCE` (D189), and for `ADD_WATCHED_ROOT_CONFIRMED` (D202).
+# and for `ADD_PAGE_OCR_CONFIDENCE` (D189), and for `ADD_WATCHED_ROOT_CONFIRMED` (D202), and for `ADD_GITIGNORE_INCLUDE` (D202 PR 3).
 case_ "the migration is registered, not merely written" \
   crates/mnema-index/src/migrations.rs \
   's~        M::up\(ADD_PATH_READER\),\n~~' \
@@ -50,6 +50,7 @@ case_ "the migration is registered, not merely written" \
         M::up(ADD_SKIP_READER),
         M::up(ADD_PAGE_OCR_CONFIDENCE),
         M::up(ADD_WATCHED_ROOT_CONFIRMED),
+        M::up(ADD_GITIGNORE_INCLUDE),
     ])' \
   mnema-index \
   'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib

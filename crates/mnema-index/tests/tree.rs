@@ -1,5 +1,5 @@
 use mnema_core::{OnDisk, SourceKind};
-use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
+use mnema_index::{Db, DocumentStatus, PathRuleChange, open, register_vector_extension};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
@@ -1116,7 +1116,7 @@ fn a_rebuild_in_flight_is_not_a_completion() {
 /// stop half-way with the folder's rule gone and its siblings not yet ruled
 /// out: the state in which a scan indexes what the person kept out.
 #[test]
-fn change_path_exclusions_is_one_transaction() {
+fn change_path_rules_is_one_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
     let root = db.insert_watched_root("/tmp/alpha").unwrap();
@@ -1129,20 +1129,124 @@ fn change_path_exclusions_is_one_transaction() {
         )
         .unwrap();
 
-    let failed = db.change_path_exclusions(
+    let failed = db.change_path_rules(
         root,
-        &["a".to_string()],
-        &["a/c".to_string(), "a/boom".to_string()],
+        &PathRuleChange {
+            excluded_removed: vec!["a".into()],
+            excluded_added: vec!["a/c".into(), "a/boom".into()],
+            ..PathRuleChange::default()
+        },
     );
 
     assert!(failed.is_err(), "the trigger must refuse the last insert");
     assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a"]);
 
-    db.change_path_exclusions(
+    db.change_path_rules(
         root,
-        &["a".to_string()],
-        &["a/c".to_string(), "a/d".to_string(), "a/c".to_string()],
+        &PathRuleChange {
+            excluded_removed: vec!["a".into()],
+            excluded_added: vec!["a/c".into(), "a/d".into(), "a/c".into()],
+            ..PathRuleChange::default()
+        },
     )
     .unwrap();
     assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a/c", "a/d"]);
+}
+
+/// D202 PR 3: the paths ticked past `.gitignore` belong to one root and go
+/// with it.
+#[test]
+fn includes_are_stored_per_root_and_go_with_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let a = db.insert_watched_root("/tmp/alpha").unwrap();
+    let b = db.insert_watched_root("/tmp/beta").unwrap();
+    db.change_path_rules(
+        a,
+        &PathRuleChange {
+            included_added: vec!["build/x".into(), "a.log".into()],
+            ..PathRuleChange::default()
+        },
+    )
+    .unwrap();
+    db.change_path_rules(
+        b,
+        &PathRuleChange {
+            included_added: vec!["vendor".into()],
+            ..PathRuleChange::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.list_gitignore_includes(a).unwrap(),
+        vec!["a.log", "build/x"]
+    );
+    assert_eq!(db.list_gitignore_includes(b).unwrap(), vec!["vendor"]);
+
+    db.delete_watched_root(a).unwrap();
+    let left: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM gitignore_include WHERE watched_root_id = ?1",
+            [a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "a removed root's includes must go with it");
+    assert_eq!(db.list_gitignore_includes(b).unwrap(), vec!["vendor"]);
+}
+
+/// One tick changes both rule sets, and a failure on the LAST write must leave
+/// the first ones unwritten too: a push-down that dropped the folder's rule and
+/// then failed to store its include would index nothing more, but one that
+/// stored the include and failed on a sibling's rule would.
+#[test]
+fn change_path_rules_is_one_transaction_across_both_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+    db.add_path_exclusion(root, "a").unwrap();
+    db.change_path_rules(
+        root,
+        &PathRuleChange {
+            included_added: vec!["old".into()],
+            ..PathRuleChange::default()
+        },
+    )
+    .unwrap();
+    db.conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE INSERT ON gitignore_include
+             WHEN NEW.path_prefix = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+
+    let failed = db.change_path_rules(
+        root,
+        &PathRuleChange {
+            excluded_removed: vec!["a".into()],
+            excluded_added: vec!["a/c".into()],
+            included_removed: vec!["old".into()],
+            included_added: vec!["new".into(), "boom".into()],
+        },
+    );
+
+    assert!(failed.is_err(), "the trigger must refuse the last insert");
+    assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a"]);
+    assert_eq!(db.list_gitignore_includes(root).unwrap(), vec!["old"]);
+
+    db.change_path_rules(
+        root,
+        &PathRuleChange {
+            excluded_removed: vec!["a".into()],
+            excluded_added: vec!["a/c".into(), "a/c".into()],
+            included_removed: vec!["old".into()],
+            included_added: vec!["new".into(), "new".into()],
+        },
+    )
+    .unwrap();
+    assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a/c"]);
+    assert_eq!(db.list_gitignore_includes(root).unwrap(), vec!["new"]);
 }

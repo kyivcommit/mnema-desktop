@@ -4,6 +4,7 @@ import Folders from './Folders.svelte';
 import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
 import { tick } from 'svelte';
+const tick_ = tick;
 import { get } from 'svelte/store';
 import { masksVersion } from './masksVersion';
 import type {
@@ -25,6 +26,7 @@ const listExclusions = vi.fn();
 const excludeSubfolder = vi.fn();
 const includeSubfolder = vi.fn();
 const setTick = vi.fn();
+const previewTick = vi.fn();
 // The job commands are the REAL wrappers, deliberately: they are what carry
 // the `'start_scan_job'` wire string this file asserts is never sent, and a
 // mock of them would make that assertion about this file's own fake.
@@ -39,6 +41,7 @@ vi.mock('../lib/ipc', async (real) => ({
   excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
   includeSubfolder: (...a: unknown[]) => includeSubfolder(...a),
   setTick: (...a: unknown[]) => setTick(...a),
+  previewTick: (...a: unknown[]) => previewTick(...a),
 }));
 
 // The dialog plugin needs its own mock — a separate module from `../lib/ipc`.
@@ -101,6 +104,8 @@ beforeEach(() => {
   excludeSubfolder.mockReset();
   includeSubfolder.mockReset();
   setTick.mockReset();
+  previewTick.mockReset();
+  previewTick.mockResolvedValue({ added: [], removed: [], included: [], unincluded: [] });
   // Folders tree PR 2: a tick is ONE `set_tick` now. The tests written before
   // it assert the write through the two older mocks, so by default the tick
   // answers through them — `off` as an exclusion, `on` as a removal — and a
@@ -109,10 +114,10 @@ beforeEach(() => {
   setTick.mockImplementation(async (rootId: number, path: string, tick: string) => {
     if (tick === 'off') {
       await excludeSubfolder(rootId, path);
-      return { added: [path], removed: [] };
+      return { added: [path], removed: [], included: [], unincluded: [] };
     }
     const removed = await includeSubfolder(rootId, path);
-    return { added: [], removed: removed ? [path] : [] };
+    return { added: [], removed: removed ? [path] : [], included: [], unincluded: [] };
   });
   // Defaults for the tests that never expand a row: an empty listing and no
   // rules. A test that expands states its own.
@@ -4069,7 +4074,7 @@ test('the tree has its own box, with the hint under it', async () => {
   const box = screen.getByTestId('folders-tree');
   expect(within(box).getByText('/synthetic/root')).toBeTruthy();
   expect(within(box).queryByTestId('folders-add')).toBeNull(); // the bar is outside the scroll
-  expect(screen.getByText('Untick a folder or a file to keep it out of the index.')).toBeTruthy();
+  expect(screen.getByText('Untick a folder or a file to keep it out of the index. What .gitignore names starts unticked — tick it to index it anyway.')).toBeTruthy();
 });
 
 // Final review, Important 2: Start was drawn only for the selected root, so a
@@ -4225,7 +4230,8 @@ test('clicking a mixed box asks to tick everything with the rule count', async (
     { prefix: 'ab', existsOnDisk: true },
   ]);
   setTick.mockReset();
-  setTick.mockResolvedValue({ added: [], removed: ['a/x', 'a/y/z'] });
+  setTick.mockResolvedValue({ added: [], removed: ['a/x', 'a/y/z'], included: [], unincluded: [] });
+  previewTick.mockResolvedValue({ added: [], removed: ['a/x', 'a/y/z'], included: [], unincluded: [] });
 
   const check = screen.getByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
   expect(check.indeterminate).toBe(true);
@@ -4340,3 +4346,157 @@ for (const [prefix, existsOnDisk] of [['Old notes', false], ['Archive/Held', tru
     expect(setTick).not.toHaveBeenCalled();
   });
 }
+
+// ── Folders tree PR 3: rows `.gitignore` names, and includes ───────────────
+
+test('a gitignored row has an empty tick and its tag only where gitignore names it', async () => {
+  await expand([
+    sub('build', { kind: 'gitIgnored', by: 'build' }),
+    fileRow('x.log', { kind: 'gitIgnored', by: 'Old' }),
+  ]);
+
+  const build = screen.getByRole('checkbox', { name: 'Index build' }) as HTMLInputElement;
+  expect(build.checked).toBe(false);
+  expect(build.indeterminate).toBe(false);
+  expect(within(screen.getByTestId('subfolder-1-build')).getByText(t('settings_entry_gitignore'))).toBeTruthy();
+  const log = screen.getByRole('checkbox', { name: 'Index x.log' }) as HTMLInputElement;
+  expect(log.checked).toBe(false);
+  expect(within(screen.getByTestId('subfolder-1-x.log')).queryByText(t('settings_entry_gitignore'))).toBeNull();
+  expect(screen.getByTestId('subfolder-1-build').classList.contains('excl')).toBe(true);
+});
+
+test('ticking a gitignored row asks before it stores an include', async () => {
+  await expand([sub('build', { kind: 'gitIgnored', by: 'build' })]);
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: [], removed: [], included: ['build'], unincluded: [] });
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index build' }));
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
+    t('settings_include_gitignored', { path: 'build' }),
+  );
+  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
+    t('settings_folders_confirm_gitignored_heading', { path: 'build' }),
+  );
+  expect(screen.getByTestId('folder-confirm-1').textContent).not.toContain(
+    t('settings_folders_confirm_include_heading', { path: 'build' }),
+  );
+  expect(setTick).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+    name: t('settings_folders_confirm_include_named', { path: 'build' }),
+  }));
+
+  await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', 'on'));
+});
+
+// PR #102 review, Important: a tick that stores only an include changes no
+// exclusion rule, and the panel must not then say the rule was already gone.
+for (const [kind, tick, change] of [
+  ['gitIgnored', 'on', { added: [], removed: [], included: ['build'], unincluded: [] }],
+  ['gitIgnoredOpen', 'all', { added: [], removed: [], included: ['build'], unincluded: ['build/x/keep.txt'] }],
+] as const) {
+  test(`a ${tick} that only changes includes does not say the rule was already gone`, async () => {
+    await expand([sub('build', { kind, by: 'build' })]);
+    previewTick.mockResolvedValue(change);
+    setTick.mockReset();
+    setTick.mockResolvedValue(change);
+
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Index build' }));
+    await screen.findByTestId('folder-confirm-1');
+    await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+      name: t('settings_folders_confirm_include_named', { path: 'build' }),
+    }));
+
+    await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', tick));
+    await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(1));
+    await tick_();
+    expect(screen.queryByText(t('settings_folders_rule_already_gone'))).toBeNull();
+  });
+}
+
+test('an included row is ticked and tagged gitignore · included only on its own include', async () => {
+  await expand([
+    fileRow('a.log', { kind: 'gitIncluded', include: 'a.log' }),
+    fileRow('b.log', { kind: 'gitIncluded', include: 'vendor' }),
+  ]);
+
+  expect((screen.getByRole('checkbox', { name: 'Index a.log' }) as HTMLInputElement).checked).toBe(true);
+  expect((screen.getByRole('checkbox', { name: 'Index b.log' }) as HTMLInputElement).checked).toBe(true);
+  expect(within(screen.getByTestId('subfolder-1-a.log')).getByText(t('settings_entry_gitignore_included'))).toBeTruthy();
+  expect(within(screen.getByTestId('subfolder-1-b.log')).queryByText(t('settings_entry_gitignore_included'))).toBeNull();
+});
+
+// Final review, Important 3: a `.gitignore` row inside does NOT make its
+// folder `–`. Otherwise an expanded folder's click asks to index everything
+// `.gitignore` names (`.env` included) instead of excluding the folder, and the
+// same click did different things collapsed and expanded.
+test('a folder whose loaded child is gitignored stays ticked and its click excludes it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('a')])
+      : subfolders([fileRow('.env', { kind: 'gitIgnored', by: 'a/.env' }, 'a'), fileRow('y.txt', { kind: 'open' }, 'a')])));
+  listExclusions.mockResolvedValue([]);
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await screen.findByRole('checkbox', { name: 'Index a' });
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/.env')).toBeTruthy());
+
+  const check = screen.getByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
+  expect(check.indeterminate).toBe(false);
+  expect(check.checked).toBe(true);
+  await fireEvent.click(check);
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'a'));
+  expect(previewTick).not.toHaveBeenCalled();
+});
+
+test('the mixed box names the rules that go and the rows that start being indexed', async () => {
+  await expand([sub('build', { kind: 'gitIgnoredOpen', by: 'build' })]);
+  previewTick.mockResolvedValue({
+    added: [], removed: ['build/old'], included: ['build'], unincluded: ['build/x/keep.txt'],
+  });
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: [], removed: [], included: [], unincluded: [] });
+
+  const check = screen.getByRole('checkbox', { name: 'Index build' }) as HTMLInputElement;
+  expect(check.indeterminate).toBe(true);
+  expect(within(screen.getByTestId('subfolder-1-build')).getByText(t('settings_entry_gitignore'))).toBeTruthy();
+  await fireEvent.click(check);
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  const text = screen.getByTestId('folder-confirm-1').textContent;
+  expect(text).toContain(t('settings_folders_include_all_cost', { count: 1 }));
+  expect(text).toContain(t('settings_all_gitignored', { count: 1 }));
+  expect(previewTick).toHaveBeenCalledWith(1, 'build', 'all');
+  expect(setTick).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+    name: t('settings_folders_confirm_include_named', { path: 'build' }),
+  }));
+  await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', 'all'));
+});
+
+test('a mixed box whose preview fails shows the sentence and stores nothing', async () => {
+  await expand([sub('build', { kind: 'gitIgnoredOpen', by: 'build' })]);
+  previewTick.mockRejectedValue(new Error('the folder went away'));
+  setTick.mockReset();
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index build' }));
+
+  await waitFor(() => expect(screen.getByText('the folder went away')).toBeTruthy());
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(setTick).not.toHaveBeenCalled();
+});
+
+test('a mixed box with only .gitignore below asks to index, not to stop excluding', async () => {
+  await expand([sub('build', { kind: 'gitIgnoredOpen', by: 'build' })]);
+  previewTick.mockResolvedValue({ added: [], removed: [], included: ['build'], unincluded: [] });
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index build' }));
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  const text = screen.getByTestId('folder-confirm-1').textContent;
+  expect(text).toContain(t('settings_folders_confirm_gitignored_heading', { path: 'build' }));
+  expect(text).toContain(t('settings_all_gitignored', { count: 1 }));
+  expect(text).not.toContain(t('settings_folders_include_all_cost', { count: 0 }));
+});

@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -218,6 +218,23 @@ const ADD_PAGE_OCR_CONFIDENCE: &str = "ALTER TABLE page ADD COLUMN ocr_confidenc
 /// Its own migration for the reason `ADD_FILE_MASK` states.
 const ADD_WATCHED_ROOT_CONFIRMED: &str = "ALTER TABLE watched_root ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1 CHECK (confirmed IN (0, 1));";
 
+/// D202, folders tree PR 3: the paths a person ticked past `.gitignore`. An
+/// include lifts the in-tree `.gitignore` stack for that path and everything
+/// under it (`crates/mnema-walk/src/gitignore.rs`); a path exclusion in
+/// `ignore_rule` still wins over it. Its own table rather than a kind column
+/// on `ignore_rule`: that table's CHECKs and partial unique index are about
+/// exclusions and tags, and an include read as an exclusion — or the reverse —
+/// is the one mix-up with a provider on the other end (D29). Empty is the
+/// behaviour before this existed.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` states.
+const ADD_GITIGNORE_INCLUDE: &str = "\
+CREATE TABLE gitignore_include (
+    watched_root_id INTEGER NOT NULL REFERENCES watched_root(id) ON DELETE CASCADE,
+    path_prefix     TEXT NOT NULL,
+    PRIMARY KEY (watched_root_id, path_prefix)
+) WITHOUT ROWID;";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -238,6 +255,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_SKIP_READER),
         M::up(ADD_PAGE_OCR_CONFIDENCE),
         M::up(ADD_WATCHED_ROOT_CONFIRMED),
+        M::up(ADD_GITIGNORE_INCLUDE),
     ])
 }
 
@@ -489,11 +507,11 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, SCHEMA_VERSION);
 
         let value: String = conn
             .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {
@@ -574,7 +592,7 @@ mod tests {
         .expect("the six-column statements a version-6 database could have written");
 
         apply(&mut conn).expect("a version-6 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
 
         let (reason, size, reader, reader_version): (
             String,
@@ -670,7 +688,7 @@ mod tests {
         .expect("the statement a version-7 database could have run");
 
         apply(&mut conn).expect("a version-7 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
         assert!(
             has_column(&conn),
             "the upgrade must add `page.ocr_confidence`"
@@ -807,6 +825,51 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
+    }
+
+    /// D202 PR 3: the include table arrives in a migration of its own, and an
+    /// index at version 9 keeps its rows and gains an empty table.
+    #[test]
+    fn the_include_table_arrives_in_its_own_migration() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 9).unwrap();
+        let tables = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'gitignore_include'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(tables(&conn), 0);
+        conn.execute(
+            "INSERT INTO watched_root (id, absolute_path) VALUES (1, '/tmp/root')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(tables(&conn), 1);
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM gitignore_include", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        conn.execute(
+            "INSERT INTO gitignore_include (watched_root_id, path_prefix) VALUES (1, 'a')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO gitignore_include (watched_root_id, path_prefix) VALUES (1, 'a')",
+                [],
+            )
+            .is_err(),
+            "one include per path per root"
+        );
+        assert_eq!(SCHEMA_VERSION, 10);
     }
 }
