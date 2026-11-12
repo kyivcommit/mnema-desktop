@@ -12,7 +12,7 @@
   import type { JobController } from './jobs';
   import { masksVersion } from './masksVersion';
   import { dialogFocus, focusCancel } from './dialog';
-  import { unapplied } from './unapplied';
+  import { unapplied, foldersWaiting, applyAction } from './unapplied';
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove. Scanning is
   // not this component's any more (Task 8): the single Scan control
@@ -110,8 +110,6 @@
   // second press during the wait sends `remove_watched_folder` twice for one
   // folder, and the second one races the re-read behind the first.
   let removing = $state<number | null>(null);
-  // D202: the folder whose Start is on the wire, so its button cannot be pressed twice.
-  let starting = $state<number | null>(null);
   // The root the `−` acts on, by id AND path: `watched_root.id` is a rowid
   // alias SQLite hands out again, so an id alone could select another folder.
   let chosen = $state<{ rootId: number; path: string } | null>(null);
@@ -1155,32 +1153,48 @@
     removeWithdrawn = null;
   }
 
-  // D202: the person's Start for a folder added through this window. The
-  // backend lets scans read it and starts one; the list re-reads so the row
-  // shows its count instead of the button.
-  async function startIndexing(root: TreeRoot) {
+  // D202: the person's press for the folders added through this window — the
+  // one "Apply changes" under the masks since 2026-11-12 (owner). Each waiting
+  // folder is confirmed (the backend lets scans read it and starts one); with
+  // none waiting the press is a plain full scan. Only over a list that is on
+  // screen: `confirm_watched_folder` takes an id alone, and after a failed
+  // re-read an id from the last good listing may name another folder.
+  async function applyChanges() {
+    const waiting = loadError === null ? roots.filter((r) => !r.confirmed) : [];
+    if (waiting.length === 0) {
+      await jobs.scan('full');
+      return;
+    }
     actionError = null;
     // The note asked for this press; once it is made the note is stale, even
     // when the scan behind it is refused — the folder is confirmed by then.
     folderAdded = false;
-    starting = root.rootId;
-    try {
-      await confirmWatchedFolder(root.rootId);
-    } catch (e) {
-      actionError = e instanceof Error ? e.message : String(e);
+    for (const root of waiting) {
+      try {
+        await confirmWatchedFolder(root.rootId);
+      } catch (e) {
+        actionError = e instanceof Error ? e.message : String(e);
+      }
     }
     // Re-read on a refusal too: the backend confirms before it starts the scan,
     // so a scan that would not start leaves a confirmed folder, and the row
-    // must show it as the backend has it rather than a stale Start. The button
-    // stays disabled until then, or a second press queues a second scan.
+    // must show it as the backend has it. The button stays disabled until then
+    // (`Apply.svelte`), or a second press queues a second scan.
     try {
       await refresh();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
-    } finally {
-      starting = null;
     }
   }
+
+  onMount(() => {
+    applyAction.set(applyChanges);
+    return () => applyAction.set(null);
+  });
+
+  $effect(() => {
+    foldersWaiting.set(loadError === null && roots.some((r) => !r.confirmed));
+  });
 
   async function addFolder() {
     actionError = null;
@@ -1284,7 +1298,6 @@
   // showing moves it too.
   const addedNoteLabel = $derived.by(() => { void $locale; return t('settings_folders_added_note'); });
   const unconfirmedLabel = $derived.by(() => { void $locale; return t('settings_folders_unconfirmed'); });
-  const startLabel = $derived.by(() => { void $locale; return t('settings_folders_start'); });
 
   // Rows carry their own count label, not a bare `t()` call in the markup —
   // a call inside `{#each}` reads `get(locale)` non-reactively (`i18n/index.ts:11`)
@@ -1660,7 +1673,6 @@
   // Named by the path: with two folders waiting, two «Start» buttons must be
   // told apart by more than their place on screen. A function read in the
   // template, so `$locale` is tracked where it is called.
-  const startNamedLabel = (path: string) => { void $locale; return t('settings_folders_start_named', { path }); };
   // A collapsed root says how many files under it the scans could not read, so
   // a shut level does not hide a failure (spec E); open, its rows say it.
   const failedLabel = (root: TreeRoot, expanded: boolean) => {
@@ -1865,19 +1877,6 @@
            alone (`confirm_watched_folder`), which may name another folder by
            then. The questions go with it, as they did inside the rows. -->
       {#each loadError === null ? rows : [] as { root, panel, removeConfirm } (root.rootId)}
-        <!-- Every unconfirmed root, not only the selected one: a folder added
-             from the launcher while another root is selected would otherwise
-             have no Start on screen and stay unindexed with nothing to press. -->
-        {#if !root.confirmed}
-          <div class="tstart">
-            <button
-              type="button"
-              data-testid={`folder-start-${root.rootId}`}
-              aria-label={startNamedLabel(root.absolutePath)}
-              disabled={starting === root.rootId}
-              onclick={() => startIndexing(root)}>{startLabel}</button>
-          </div>
-        {/if}
         <!-- A popup over the section, not a line in it (owner, 2026-11-12):
              a question about a row deep in a long tree must not read as part
              of the tree. Esc answers "Cancel". -->

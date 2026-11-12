@@ -5,7 +5,8 @@
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
   import type { JobController } from './jobs';
-  import { unapplied } from './unapplied';
+  import { get } from 'svelte/store';
+  import { unapplied, foldersWaiting, applyAction } from './unapplied';
 
   let { jobs }: { jobs: JobController } = $props();
   // The controller lives for the window; read once, as `JobStrip.svelte` does.
@@ -24,14 +25,15 @@
   async function apply() {
     applying = true;
     try {
-      await jobs.scan('full');
+      const action = get(applyAction);
+      await (action === null ? jobs.scan('full') : action());
     } finally {
       applying = false;
     }
   }
 </script>
 
-{#if $unapplied}
+{#if $unapplied || $foldersWaiting}
   <div class="apply">
     <button
       type="button"

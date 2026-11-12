@@ -8,6 +8,7 @@ const tick_ = tick;
 import { get } from 'svelte/store';
 import { masksVersion } from './masksVersion';
 import { unapplied } from './unapplied';
+import Apply from './Apply.svelte';
 import type {
   Counts, ScanState, StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile,
   TreeListing, TreeRoot,
@@ -220,7 +221,7 @@ test('a successful add shows the note and no row offers to scan; it follows a la
 
   expect(screen.getByTestId('folders-added-note')).toBeTruthy();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
+    'Folder added. Untick what should stay out, set masks, then press “Apply changes” at the bottom.',
   );
   // No row offers to scan any more: the only control this row carries besides
   // Subfolders is Remove.
@@ -230,14 +231,14 @@ test('a successful add shows the note and no row offers to scan; it follows a la
   setLocale('uk');
   await tick();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Почати індексацію».',
+    'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Застосувати зміни» внизу.',
   );
-  expect(screen.queryByText('Folder added. Untick what should stay out, set masks, then press “Start indexing”.'))
+  expect(screen.queryByText('Folder added. Untick what should stay out, set masks, then press “Apply changes” at the bottom.'))
     .toBeNull();
   setLocale('en');
   await tick();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
+    'Folder added. Untick what should stay out, set masks, then press “Apply changes” at the bottom.',
   );
 
   // A job ending changes nothing about what this note is telling a person to
@@ -3317,26 +3318,32 @@ test('a window opened after a reading pass has already ended does not withdraw o
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
-// D202: a folder added through the window waits for the person's Start.
-test('an unconfirmed folder shows Start in place of its count; a confirmed one does not', async () => {
+// D202: a folder added through the window waits for the person's press —
+// since 2026-11-12 the one "Apply changes" under the masks (owner), rendered
+// beside the tree here as `Settings.svelte` does.
+function renderWithApply() {
+  const jobs = createJobController();
+  render(Folders, { props: { jobs } });
+  render(Apply, { props: { jobs } });
+}
+test('an unconfirmed folder waits for Apply changes in place of its count; a confirmed one does not', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([
     root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false }),
     root({ rootId: 4, absolutePath: '/synthetic/old', confirmed: true }),
   ]));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
 
-  await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
+  await waitFor(() => expect(screen.getByTestId('folders-apply')).toBeTruthy());
   const unconfirmed = screen.getByTestId('folder-row-3');
   expect(within(unconfirmed).getByText(t('settings_folders_unconfirmed'))).toBeTruthy();
-  // Start sits under the tree, for the selected root — and an unconfirmed
-  // folder is selected on its own when nothing else is.
-  expect(screen.getByTestId('folder-start-3').textContent).toBe('Start indexing');
+  // One button for every change, under the masks (owner, 2026-11-12) — and an
+  // unconfirmed folder is selected on its own when nothing else is.
+  expect(screen.getByTestId('folders-apply').textContent).toBe('Apply changes');
   expect(screen.getByTestId('folder-select-3').getAttribute('aria-pressed')).toBe('true');
   expect(within(unconfirmed).queryByText(/Indexed:/)).toBeNull();
 
   const confirmed = screen.getByTestId('folder-row-4');
-  expect(screen.queryByTestId('folder-start-4')).toBeNull();
   expect(within(confirmed).queryByText(t('settings_folders_unconfirmed'))).toBeNull();
   expect(within(confirmed).getByText(/Indexed:/)).toBeTruthy();
 });
@@ -3346,12 +3353,12 @@ test('Start confirms the folder and the list re-reads', async () => {
   listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
   listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: true })]));
   confirmWatchedFolder.mockResolvedValue(undefined);
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
 
-  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
 
   expect(confirmWatchedFolder).toHaveBeenCalledWith(3);
-  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
   expect(listTree).toHaveBeenCalledTimes(2);
 });
 
@@ -3359,14 +3366,14 @@ test('a refused Start says why and can be pressed again', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([root({ rootId: 3, confirmed: false })]));
   confirmWatchedFolder.mockRejectedValueOnce(new Error('no watched folder with id 3'));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
 
-  const start = await screen.findByTestId('folder-start-3');
+  const start = await screen.findByTestId('folders-apply');
   await fireEvent.click(start);
 
   await waitFor(() =>
     expect(screen.getByTestId('folders-action-error').textContent).toBe('no watched folder with id 3'));
-  expect((screen.getByTestId('folder-start-3') as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByTestId('folders-apply') as HTMLButtonElement).disabled).toBe(false);
 });
 
 test('Start takes away the note that told the person to press it', async () => {
@@ -3377,14 +3384,14 @@ test('Start takes away the note that told the person to press it', async () => {
   open.mockResolvedValue('/synthetic/root');
   addWatchedFolder.mockResolvedValue(3);
   confirmWatchedFolder.mockResolvedValue(undefined);
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
   await waitFor(() => expect(screen.getByTestId('folders-added-note')).toBeTruthy());
 
-  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
 
-  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
   expect(screen.queryByTestId('folders-added-note')).toBeNull();
 });
 
@@ -3395,12 +3402,12 @@ test('the list re-reads when the window comes to the front', async () => {
   setLocale('en');
   listTree.mockResolvedValueOnce(listing([]));
   listTree.mockResolvedValueOnce(listing([root({ rootId: 8, absolutePath: '/synthetic/added', confirmed: false })]));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
 
   window.dispatchEvent(new Event('focus'));
 
-  await waitFor(() => expect(screen.getByTestId('folder-start-8')).toBeTruthy());
+  await waitFor(() => expect(screen.getByTestId('folders-apply')).toBeTruthy());
   expect(listTree).toHaveBeenCalledTimes(2);
 });
 
@@ -3411,11 +3418,11 @@ test('a refused Start still re-reads the list', async () => {
   listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
   listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: true })]));
   confirmWatchedFolder.mockRejectedValueOnce(new Error('a stored exclusion is invalid'));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
 
-  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
 
-  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
   expect(screen.getByTestId('folders-action-error').textContent).toBe('a stored exclusion is invalid');
 });
 
@@ -3424,7 +3431,7 @@ test('a refused Start still re-reads the list', async () => {
 test('a focus re-reads the roots, not an expanded panel', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([root({ rootId: 1 })]));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
   await fireEvent.click(await screen.findByTestId('folder-expand-1'));
   await waitFor(() => expect(listSubfolders).toHaveBeenCalledTimes(1));
 
@@ -3445,12 +3452,12 @@ test('a refused Start also takes away the note that asked for it', async () => {
   open.mockResolvedValue('/synthetic/root');
   addWatchedFolder.mockResolvedValue(3);
   confirmWatchedFolder.mockRejectedValueOnce(new Error('a stored exclusion is invalid'));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
-  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
 
-  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
   expect(screen.queryByTestId('folders-added-note')).toBeNull();
   expect(screen.getByTestId('folders-action-error').textContent).toBe('a stored exclusion is invalid');
 });
@@ -3463,16 +3470,16 @@ test('Start stays disabled until the list has re-read', async () => {
   let release!: (l: TreeListing) => void;
   listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => (release = r)));
   confirmWatchedFolder.mockResolvedValue(undefined);
-  render(Folders, { props: { jobs: createJobController() } });
-  const start = await screen.findByTestId('folder-start-3');
+  renderWithApply();
+  const start = await screen.findByTestId('folders-apply');
 
   await fireEvent.click(start);
   await waitFor(() => expect(confirmWatchedFolder).toHaveBeenCalledTimes(1));
   await tick();
-  expect((screen.getByTestId('folder-start-3') as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByTestId('folders-apply') as HTMLButtonElement).disabled).toBe(true);
 
   release(listing([root({ rootId: 3, confirmed: true })]));
-  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
 });
 
 // ── Folders as one tree panel (PR 1 of the folders-tree spec) ────────────────
@@ -3615,7 +3622,7 @@ test('the tree has its own box, with the hint under it', async () => {
 test('every unconfirmed folder has its Start, whatever is selected', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWithApply();
   await screen.findByText('/synthetic/root');
   await fireEvent.click(screen.getByTestId('folder-select-1'));
 
@@ -3625,10 +3632,8 @@ test('every unconfirmed folder has its Start, whatever is selected', async () =>
   ]));
   window.dispatchEvent(new Event('focus'));
 
-  await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
+  await waitFor(() => expect(screen.getByTestId('folders-apply')).toBeTruthy());
   expect(screen.getByTestId('folder-select-1').getAttribute('aria-pressed')).toBe('true');
-  expect(screen.queryByTestId('folder-start-1')).toBeNull();
-  expect(screen.getByRole('button', { name: 'Start indexing /synthetic/new' })).toBeTruthy();
 });
 
 // PR #100 review 1. A failed re-read takes the list off the screen, and every
@@ -3638,14 +3643,14 @@ test('every unconfirmed folder has its Start, whatever is selected', async () =>
 test('a failed re-read takes Start and the per-root questions off the screen with the list', async () => {
   setLocale('en');
   listTree.mockResolvedValueOnce(listing([root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false })]));
-  render(Folders, { props: { jobs: createJobController() } });
-  await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
+  renderWithApply();
+  await waitFor(() => expect(screen.getByTestId('folders-apply')).toBeTruthy());
 
   listTree.mockRejectedValueOnce(new Error('boom'));
   window.dispatchEvent(new Event('focus'));
 
   await waitFor(() => expect(screen.getByTestId('folders-load-reason').textContent).toBe('boom'));
-  expect(screen.queryByTestId('folder-start-3')).toBeNull();
+  expect(screen.queryByTestId('folders-apply')).toBeNull();
 });
 
 // PR #100 review 4. Built-in folders and symlinks are hidden, so a folder that
@@ -4125,4 +4130,45 @@ test('a long root path keeps its end in view, with the home folder as ~', async 
     .toBe('/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/Books');
   expect(screen.getByText('~/notes')).toBeTruthy();
   expect(screen.getByText('/srv/library')).toBeTruthy();
+});
+
+test('Apply changes confirms every folder waiting for it, and only those', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([
+    root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false }),
+    root({ rootId: 4, absolutePath: '/synthetic/old', confirmed: true }),
+    root({ rootId: 5, absolutePath: '/synthetic/newer', confirmed: false }),
+  ]));
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 3, absolutePath: '/synthetic/new' }),
+    root({ rootId: 4, absolutePath: '/synthetic/old' }),
+    root({ rootId: 5, absolutePath: '/synthetic/newer' }),
+  ]));
+  confirmWatchedFolder.mockResolvedValue(undefined);
+  renderWithApply();
+
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
+
+  await waitFor(() => expect(screen.queryByTestId('folders-apply')).toBeNull());
+  expect(confirmWatchedFolder.mock.calls).toEqual([[3], [5]]);
+  expect(invoke).not.toHaveBeenCalledWith('start_scan_job', expect.anything());
+});
+
+// PR #100 review 1, carried into the merged button: after a failed re-read an
+// id from the last good listing may name another folder, so a press confirms
+// nothing and is a plain full scan.
+test('after a failed re-read Apply changes confirms nothing by a stale id', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false })]));
+  renderWithApply();
+  await screen.findByTestId('folders-apply');
+  listTree.mockRejectedValueOnce(new Error('boom'));
+  window.dispatchEvent(new Event('focus'));
+  await waitFor(() => expect(screen.getByTestId('folders-load-reason').textContent).toBe('boom'));
+  unapplied.set(true); // a stored change still waits, so the button is there
+
+  await fireEvent.click(await screen.findByTestId('folders-apply'));
+
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('start_scan_job', { entry: 'full' }));
+  expect(confirmWatchedFolder).not.toHaveBeenCalled();
 });

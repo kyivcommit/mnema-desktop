@@ -701,7 +701,6 @@ main select:focus-visible {
 .tnotes > :first-child:not(.scrim) { margin-top: 10px; }
 .tnotes > :last-child:not(.scrim) { margin-bottom: 10px; }
 .tnotes p { margin: 0; }
-.tstart { display: flex; align-items: center; gap: 8px; }
 
 .bar {
   display: flex;
