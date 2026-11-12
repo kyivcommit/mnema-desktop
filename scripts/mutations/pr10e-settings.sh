@@ -151,8 +151,8 @@ case_ "settings.css: !important on a font property that already sets the triple"
 
 case_ "Folders.svelte: the open arm marks itself excluded" \
   ui/src/settings/Folders.svelte \
-  's~(control: '"'"'exclude'"'"', expandable: true, excluded: )false~${1}true~' \
-  "control: 'exclude', expandable: true, excluded: true" \
+  's~(settings_subfolder_open'"'"'\), control: '"'"'exclude'"'"', expandable: true, excluded: )false~${1}true~' \
+  "t('settings_subfolder_open'), control: 'exclude', expandable: true, excluded: true" \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
 
 case_ "tokens.test.ts: the font guard stops skipping the at-rule container" \
