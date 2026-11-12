@@ -476,9 +476,9 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
         // whose text is sent to a third-party provider, so a rule that will not
         // apply stops the scan rather than being silently absent. `with_masks`
         // REPLACES the mask set, so the whole stored set goes in one call.
-        let rules = WalkRules::new(true, true, prefixes)?
-            .with_masks(masks.clone())?
-            .with_includes(includes)?;
+        let rules = WalkRules::new(true, true, prefixes)?.with_masks(masks.clone())?;
+        // D202 PR 3: the paths ticked past `.gitignore`, refused the same way.
+        let rules = rules.with_includes(includes)?;
         prepared.push(PreparedRoot {
             id,
             path: PathBuf::from(path),
