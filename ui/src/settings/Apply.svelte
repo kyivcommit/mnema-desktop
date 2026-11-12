@@ -15,10 +15,18 @@
   const scanRunning = $derived($jobState.scan.snapshot.kind === 'running');
   let applying = $state(false);
 
-  // A scan from anywhere (the tray, the Scanning section) applies the change too.
-  onMount(() => jobs.state.subscribe(({ scan }) => {
-    if (scan.snapshot.kind === 'running') unapplied.set(false);
-  }));
+  // A scan from anywhere (the tray, the Scanning section) applies the change
+  // too — on the move INTO running only. A progress tick re-emits a running
+  // snapshot, and a change stored during the scan must keep its reminder
+  // (PR #103 review 1).
+  onMount(() => {
+    let wasRunning = get(jobs.state).scan.snapshot.kind === 'running';
+    return jobs.state.subscribe(({ scan }) => {
+      const running = scan.snapshot.kind === 'running';
+      if (running && !wasRunning) unapplied.set(false);
+      wasRunning = running;
+    });
+  });
 
   const label = $derived.by(() => { void $locale; return t('settings_folders_apply'); });
 

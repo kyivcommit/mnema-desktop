@@ -66,3 +66,24 @@ test('pressing it starts a full scan, and it goes once a scan runs', async () =>
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Застосувати зміни' })).toBeNull());
   expect(get(unapplied)).toBe(false);
 });
+
+// PR #103 review 1: a progress tick re-emits a running snapshot. A change
+// stored DURING a scan must keep its reminder through those ticks and after
+// the scan ends — only the move INTO running clears it.
+test('a change stored while a scan runs keeps Apply changes through its progress and after it ends', async () => {
+  setLocale('en');
+  renderMounted();
+  await waitFor(() => expect(deliver).not.toBeNull());
+  const running = (revision: number): ScanState => ({
+    ...IDLE, revision,
+    snapshot: { kind: 'running', cancellable: true, phase: { kind: 'embedding', counts: { done: revision, total: 9, skipped: 0, refused: 0, contended: 0, secondsLeft: null } } },
+  });
+  deliver!(running(1));
+
+  unapplied.set(true);
+  deliver!(running(2)); // a progress tick
+  deliver!({ ...IDLE, revision: 3 }); // the scan ends
+
+  expect(get(unapplied)).toBe(true);
+  expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeTruthy();
+});

@@ -59,8 +59,8 @@
   // it, so a note written into it would be dropped with it and the press would
   // read as a press that did nothing.
   //
-  // A boolean and not the sentence, for `alreadyGone`'s reason: a `t()` frozen
-  // here would keep its language through a switch. Cleared at the four
+  // A boolean and not the sentence: a `t()` frozen here would keep its
+  // language through a switch. Cleared at the four
   // functions a press into this component can start — `askExclude`,
   // `askInclude`, `addFolder`, `askRemove` — for the same rule as
   // `actionError`: what the last press led to stands until the next one. Not
@@ -165,8 +165,7 @@
     pending: Pending | null;
   };
 
-  // 🔴 Numbers, not a sentence, for the same reason `alreadyGone` is a boolean:
-  // a sentence frozen at the moment of the click keeps its language through a
+  // 🔴 Numbers, not a sentence: a sentence frozen at the moment of the click keeps its language through a
   // switch. And numbers READ ONCE, from one reply — re-deriving them per render
   // would let the question a person is answering renumber itself underneath
   // them.
@@ -249,16 +248,24 @@
     return e instanceof Error ? e.message : String(e);
   }
 
+  // Whether a LOADED level at or under `tree` holds a row `.gitignore` names —
+  // as if the person had unticked it (owner's ruling 2026-11-12). A collapsed
+  // folder cannot know without a walk per row, so unloaded levels say nothing.
+  function holdsGitignored(tree: SubTree): boolean {
+    return tree.listing.entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen')
+      || Object.values(tree.children).some(holdsGitignored);
+  }
+
   function patch(rootId: number, fields: Partial<Panel>) {
     const panel = panels[rootId];
     if (panel === undefined) return; // the row was shut while this was running
     const next = { ...panel, ...fields };
     panels = { ...panels, [rootId]: next };
     if ((fields.rules || fields.tree) && next.rules) {
-      // A top-level row `.gitignore` names counts as unticked (owner's ruling
-      // 2026-11-12), as it does for a folder's mixed box.
+      // A row `.gitignore` names counts as unticked (owner's ruling
+      // 2026-11-12), on any loaded level, as for a folder's mixed box.
       const some = next.rules.some((r) => r.existsOnDisk)
-        || (next.tree?.listing.entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen') ?? false);
+        || (next.tree !== null && holdsGitignored(next.tree));
       marks = { ...marks, [rootId]: { path: panel.rootPath, some } };
     }
   }
@@ -973,8 +980,7 @@
   // back. The next successful `refresh` — a later ending, an add, a remove,
   // none of which withdraw anything — then cleared
   // `loadError` and redrew the panel WITH the question still standing, stating
-  // pre-scan numbers as current and carrying no `withdrawnNote` to say a scan
-  // had happened underneath it.
+  // pre-scan numbers as current, though a scan had happened underneath it.
   //
   // The question is made wrong by the ENDING, not by a successful re-read, so
   // nothing about withdrawing it may depend on a call that can fail. The
@@ -1114,7 +1120,7 @@
   });
 
   // 🔴 Task 9. A press about something else in this list abandons the removal
-  // question, and takes its withdrawn note with it. The rule is the one
+  // question. The rule is the one
   // `rootChanged` is written under — what the last press led to stands until
   // the next one — and its three sites are the three presses that start
   // something here besides the removal itself: `askExclude`, `askInclude` and
@@ -1210,9 +1216,8 @@
   //
   // The three banners are cleared HERE, at the press, and deliberately not
   // again in `confirmRemove`: every path into that function runs through this
-  // one first, which is the rule `askExclude` states for `withdrawn`. The rule
-  // itself is `rootChanged`'s own — what the last press led to stands until the
-  // next one — and `removeWithdrawn` joins them for it.
+  // one first. The rule itself is `rootChanged`'s own — what the last press
+  // led to stands until the next one.
   function askRemove(root: TreeRoot) {
     actionError = null;
     rootChanged = false;
@@ -1453,11 +1458,9 @@
         mixed: control === 'exclude' && (
           heldBelow(rules, entry.relativePath)
           || entry.state.kind === 'gitIgnoredOpen'
-          // What `.gitignore` names is as if the person had unticked it
-          // (owner's ruling 2026-11-12), so its folder is `–`, as for a rule.
-          // A LOADED level only: a collapsed folder cannot know what
-          // `.gitignore` holds below it without a walk per row.
-          || (child !== undefined && child.listing.entries.some((e) => e.state.kind === 'gitIgnored'))
+          // What `.gitignore` names is as if the person had unticked it, so
+          // its folder is `–`, as for a rule (`holdsGitignored`).
+          || (child !== undefined && holdsGitignored(child))
         ),
         tag: control === 'none' ? sentence : gitTag(entry),
         mark:
@@ -1827,8 +1830,7 @@
               aria-label={removeConfirm.question}
               tabindex="-1"
               data-testid={`folder-remove-confirm-${root.rootId}`}
-              use:dialogFocus
-              onkeydown={(e) => { if (e.key === 'Escape') cancelRemove(); }}>
+              use:dialogFocus={cancelRemove}>
               <p>{removeConfirm.question}</p>
               <div class="dialog-actions">
                 <button
@@ -1861,8 +1863,7 @@
                 aria-label={confirm.kind === 'checking' ? confirm.checkingLabel : confirm.heading}
                 tabindex="-1"
                 data-testid={`folder-confirm-${root.rootId}`}
-                use:dialogFocus
-                onkeydown={(e) => { if (e.key === 'Escape') dismiss(root.rootId); }}>
+                use:dialogFocus={() => dismiss(root.rootId)}>
                 {#if confirm.kind === 'checking'}
                   <p>{confirm.checkingLabel}</p>
                 {:else}

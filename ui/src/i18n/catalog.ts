@@ -72,11 +72,6 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
   | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
   | 'settings_subfolder_index_named'
- 
- 
- 
- 
- 
   | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
   | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
@@ -86,14 +81,12 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_gitignored' | 'settings_subfolder_gitignored_open'
   | 'settings_subfolder_git_included' | 'settings_include_gitignored' | 'settings_all_gitignored'
   | 'settings_folders_confirm_gitignored_heading'
- 
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
   | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
   | 'settings_folders_removing'
- 
   | 'settings_folders_added_note' | 'settings_folders_unconfirmed'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'

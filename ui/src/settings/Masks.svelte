@@ -492,8 +492,7 @@
             aria-label={q.kind === 'checking' ? q.label : q.heading}
             tabindex="-1"
             data-testid="mask-confirm"
-            use:dialogFocus
-            onkeydown={(e) => { if (e.key === 'Escape') dismiss(); }}>
+            use:dialogFocus={dismiss}>
             {#if q.kind === 'checking'}
               <p>{q.label}</p>
             {:else}

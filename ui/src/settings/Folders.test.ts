@@ -3995,3 +3995,53 @@ test('after a failed re-read Apply changes confirms nothing by a stale id', asyn
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('start_scan_job', { entry: 'full' }));
   expect(confirmWatchedFolder).not.toHaveBeenCalled();
 });
+
+// PR #103 review 2: `aria-modal` promises the keyboard stays in the popup.
+// Tab wraps inside it, focus sent outside comes back, and Esc cancels from
+// wherever the keyboard is.
+test('the popup keeps the keyboard: Tab wraps, focus outside returns, Esc anywhere cancels', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-x')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  const dialog = await screen.findByRole('dialog', { name: 'Exclude drop?' });
+  const cancel = screen.getByRole('button', { name: 'Leave drop as it is' });
+  const confirm = screen.getByRole('button', { name: 'Confirm excluding drop' });
+  await waitFor(() => expect(document.activeElement).toBe(cancel));
+
+  await fireEvent.keyDown(cancel, { key: 'Tab' });
+  expect(document.activeElement).toBe(confirm);
+  await fireEvent.keyDown(confirm, { key: 'Tab', shiftKey: true });
+  expect(document.activeElement).toBe(cancel);
+
+  screen.getByTestId('folder-select-1').focus();
+  expect(dialog.contains(document.activeElement)).toBe(true);
+
+  await fireEvent.keyDown(document.body, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// PR #103 review 3: the root and a folder read `.gitignore` off every LOADED
+// level, not only the one right under them, so the root never says
+// "Everything is indexed" over a `–` it can see — and a held-but-open folder
+// one level down makes its parent `–` too.
+test('a gitignored row deep in an open folder makes the folder and the root mixed', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listExclusions.mockResolvedValue([]);
+  listSubfolders.mockImplementation((_rootId: number, path: string) => Promise.resolve(subfolders(
+    path === '' ? [sub('sub'), sub('other')]
+    : path === 'sub' ? [sub('keep', undefined, 'sub'), sub('vendor', { kind: 'gitIgnoredOpen', by: 'sub/vendor' }, 'sub')]
+    : [],
+  )));
+  render(Folders, { props: { jobs: createJobController() } });
+  await fireEvent.click(await screen.findByTestId('folder-expand-1'));
+  await fireEvent.click(await screen.findByTestId('subfolder-expand-1-sub'));
+  await screen.findByTestId('subfolder-1-sub/vendor');
+
+  const tick = (name: string) => screen.getByRole('checkbox', { name: `Index ${name}` }) as HTMLInputElement;
+  await waitFor(() => expect(tick('sub').indeterminate).toBe(true));
+  expect(tick('other').indeterminate).toBe(false);
+  expect(screen.getByTestId('folder-root-mark-1').textContent).toBe('–');
+});
