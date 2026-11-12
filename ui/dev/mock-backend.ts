@@ -17,7 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, DocPageView, PdfPageView, HistoryEntry, IndexRead,
-  KeyState, LocaleChoice, ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
+  KeyState, LocaleChoice, ModelRole, Phase, RuleChange, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
 // The history as `list_history` keeps it, with the answer each question got.
@@ -64,6 +64,8 @@ function initialState(scenario: string) {
     nextHistoryId: history.length + 1,
     masks: fresh ? [] : ['*.tmp'],
     exclusions: new Map<number, string[]>(),
+    // Folders tree PR 3: includes past `.gitignore`, per root.
+    includes: new Map<number, string[]>(),
     scan,
     prefs,
     theme: 'system' as ThemeChoice,
@@ -169,6 +171,25 @@ const standTexts: Record<string, string> = {
   'doc-6': 'Mnema reads a folder of documents and answers with cited sources.',
   'doc-9': 'An index of the papers in this folder.',
 };
+
+function plan(s: ReturnType<typeof initialState>, a: Record<string, unknown>): RuleChange {
+  const id = a.rootId as number;
+  const path = a.relativePath as string;
+  const list = s.exclusions.get(id) ?? [];
+  const inc = s.includes.get(id) ?? [];
+  const gitignored = path === 'build' || path.startsWith('build/');
+  if (a.tick === 'off') {
+    if (inc.includes(path)) return { added: [], removed: [], included: [], unincluded: [path] };
+    return { added: [path], removed: [], included: [], unincluded: [] };
+  }
+  const removed = list.filter((p) => p === path || path.startsWith(`${p}/`) || (a.tick === 'all' && p.startsWith(`${path}/`)));
+  if (a.tick === 'all') {
+    const unincluded = inc.filter((p) => p.startsWith(`${path}/`));
+    const included = path === 'build' || path === '' ? ['build'] : [];
+    return { added: [], removed, included, unincluded };
+  }
+  return { added: [], removed, included: gitignored ? [path] : [], unincluded: [] };
+}
 
 export function installMockBackend(win: 'settings' | 'launcher') {
   const query = new URLSearchParams(location.search);
@@ -315,19 +336,31 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const dir = a.relativePath as string;
       const at = (name: string) => (dir === '' ? name : `${dir}/${name}`);
       const held = rules.find((p) => at('x').startsWith(`${p}/`));
+      // PR 3: a `.gitignore` at the root names `build/`.
+      const includes = s.includes.get(a.rootId as number) ?? [];
+      const git = (path: string) => {
+        if (path !== 'build' && !path.startsWith('build/')) return null;
+        const lifting = includes.find((i) => path === i || path.startsWith(`${i}/`));
+        if (lifting !== undefined) return { kind: 'gitIncluded', include: lifting };
+        if (includes.some((i) => i.startsWith(`${path}/`))) return { kind: 'gitIgnoredOpen', by: 'build' };
+        return { kind: 'gitIgnored', by: 'build' };
+      };
       const state = (path: string) =>
         held !== undefined ? { kind: 'excludedByAncestor', prefix: held }
-        : rules.includes(path) ? { kind: 'excluded' } : { kind: 'open' };
+        : rules.includes(path) ? { kind: 'excluded' } : git(path) ?? { kind: 'open' };
       const row = (name: string, isDir: boolean, extra: Record<string, unknown> = {}) => ({
         name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, ...extra,
       });
       const entries = dir === ''
         ? [
             row('archive', true, { failedBelow: 2 }),
+            row('build', true),
             row('drafts', true),
             row('node_modules', true, { state: { kind: 'builtIn' } }),
             row('notes.md', false),
           ]
+        : dir === 'build'
+        ? [row('keep.txt', false), row('out.txt', false)]
         : [
             row('2019', true),
             row('debug.log', false, { state: { kind: 'masked', mask: '*.log' } }),
@@ -342,17 +375,16 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const id = a.rootId as number;
       s.exclusions.set(id, [...(s.exclusions.get(id) ?? []), a.relativePath as string]);
     },
+    // A rough model of `ticks.rs` — enough for the stand, not a second plan.
+    preview_tick: (a) => plan(s, a),
     set_tick: (a) => {
       const id = a.rootId as number;
-      const path = a.relativePath as string;
+      const change = plan(s, a);
       const list = s.exclusions.get(id) ?? [];
-      if (a.tick === 'off') {
-        s.exclusions.set(id, [...list, path]);
-        return { added: [path], removed: [] };
-      }
-      const removed = list.filter((p) => p === path || path.startsWith(`${p}/`) || (a.tick === 'all' && p.startsWith(`${path}/`)));
-      s.exclusions.set(id, list.filter((p) => !removed.includes(p)));
-      return { added: [], removed };
+      s.exclusions.set(id, [...list.filter((p) => !change.removed.includes(p)), ...change.added]);
+      const inc = s.includes.get(id) ?? [];
+      s.includes.set(id, [...inc.filter((p) => !change.unincluded.includes(p)), ...change.included]);
+      return change;
     },
     include_subfolder: (a) => {
       const id = a.rootId as number;

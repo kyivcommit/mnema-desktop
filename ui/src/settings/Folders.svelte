@@ -5,7 +5,7 @@
   import { locale, t } from '../i18n';
   import {
     listTree, addWatchedFolder, removeWatchedFolder, confirmWatchedFolder,
-    listSubfolders, listExclusions, includeSubfolder, setTick,
+    listSubfolders, listExclusions, includeSubfolder, setTick, previewTick,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
@@ -219,10 +219,15 @@
         // no row for `set_tick` to find, and one under another rule would be
         // pushed down over every sibling (PR #101 review).
         fromRule: boolean;
+        // Folders tree PR 3: the row is one `.gitignore` holds, so the answer
+        // stores an include and the sentence says so.
+        gitignored: boolean;
       }
     // A mixed box was clicked: every rule strictly under `path` goes. `rules`
-    // is how many, frozen at the press like every other number here.
-    | { kind: 'all'; path: string; rules: number };
+    // is how many, and `gitignored` how many rows `.gitignore` holds start
+    // being indexed — both from `preview_tick`, the shell's own plan of the
+    // press, frozen at the press like every other number here.
+    | { kind: 'all'; path: string; rules: number; gitignored: number };
 
   let panels = $state<Record<number, Panel>>({});
 
@@ -719,6 +724,7 @@
   // not coexist, and a default no test can reach is a guard that cannot fail.
   async function askInclude(
     rootId: number, path: string, existsOnDisk: boolean, pushDown = false, fromRule = false,
+    gitignored = false,
   ) {
     // Captured before the await for `askExclude`'s reason, and `rules` is read
     // from that same capture on purpose: the question states what was true when
@@ -767,6 +773,7 @@
         heldAbove: heldAbove(panel.rules, path),
         pushDown,
         fromRule,
+        gitignored,
       },
     });
   }
@@ -798,8 +805,21 @@
       abandonChangedFolder(rootId);
       return;
     }
-    const rules = (panel.rules ?? []).filter((rule) => under(rule.prefix, path)).length;
-    patch(rootId, { pending: { kind: 'all', path, rules } });
+    // Folders tree PR 3: the shell plans the press and writes nothing — which
+    // rows `.gitignore` holds is the walk's own layer's answer, never this
+    // window's (D202). A failure stores nothing and says why.
+    let change;
+    try {
+      change = await previewTick(rootId, path, 'all');
+    } catch (e) {
+      if (asks[rootId] !== generation) return;
+      patch(rootId, { pending: null, actionError: message(e) });
+      return;
+    }
+    if (asks[rootId] !== generation) return;
+    patch(rootId, {
+      pending: { kind: 'all', path, rules: change.removed.length, gitignored: change.included.length },
+    });
   }
 
   // What is stored is the path the QUESTION carries, and it is read from the
@@ -1434,6 +1454,16 @@
         return { sentence: '', control: 'none', expandable: false, excluded: false };
       case 'unusableName':
         return { sentence: t('settings_subfolder_unusable_name'), control: 'none', expandable: false, excluded: false };
+      // Folders tree PR 3. Held by `.gitignore`: an empty tick that stores an
+      // include, and it opens so a file deeper inside can be ticked alone.
+      case 'gitIgnored':
+        return { sentence: t('settings_subfolder_gitignored', { by: state.by }), control: 'include', expandable: true, excluded: true };
+      // Held, but the walk goes in for an include below: on, and mixed
+      // (`buildLevel`), so its click ticks everything inside.
+      case 'gitIgnoredOpen':
+        return { sentence: t('settings_subfolder_gitignored_open', { by: state.by }), control: 'exclude', expandable: true, excluded: false };
+      case 'gitIncluded':
+        return { sentence: t('settings_subfolder_git_included'), control: 'exclude', expandable: true, excluded: false };
       // 🔴 A compile-time arm with a run-time consequence, and the two are
       // answered in different places on purpose.
       //
@@ -1460,6 +1490,21 @@
         const unreachable: never = state;
         return unreachable;
       }
+    }
+  }
+
+  // The `.gitignore` tag beside a name — only on the row `.gitignore` names
+  // (or whose own include it is), not on every row it holds from above: the
+  // spec's marks are about the row the rule is on.
+  function gitTag(entry: Subfolder): string | null {
+    switch (entry.state.kind) {
+      case 'gitIgnored':
+      case 'gitIgnoredOpen':
+        return entry.state.by === entry.relativePath ? t('settings_entry_gitignore') : null;
+      case 'gitIncluded':
+        return entry.state.include === entry.relativePath ? t('settings_entry_gitignore_included') : null;
+      default:
+        return null;
     }
   }
 
@@ -1509,8 +1554,14 @@
           control === 'exclude' || control === 'include'
             ? t('settings_subfolder_index_named', { path: entry.relativePath })
             : null,
-        mixed: control === 'exclude' && heldBelow(rules, entry.relativePath),
-        tag: control === 'none' ? sentence : null,
+        mixed: control === 'exclude' && (
+          heldBelow(rules, entry.relativePath)
+          || entry.state.kind === 'gitIgnoredOpen'
+          // A LOADED level only (plan ruling 10): a collapsed folder cannot
+          // know what `.gitignore` holds below it without a walk per row.
+          || (child !== undefined && child.listing.entries.some((e) => e.state.kind === 'gitIgnored'))
+        ),
+        tag: control === 'none' ? sentence : gitTag(entry),
         mark:
           entry.failure !== null
             ? { text: t('settings_entry_failed'), title: entry.failure.reason }
@@ -1587,8 +1638,16 @@
     if (pending.kind === 'all') {
       return {
         kind: 'question',
-        heading: t('settings_folders_confirm_include_heading', { path }),
-        cost: t('settings_folders_include_all_cost', { count: pending.rules }),
+        // PR 3: with no rule of the person's to remove, "stop excluding" would
+        // be false — the press is about what `.gitignore` names.
+        heading: pending.rules === 0 && pending.gitignored > 0
+          ? t('settings_folders_confirm_gitignored_heading', { path })
+          : t('settings_folders_confirm_include_heading', { path }),
+        cost: pending.gitignored === 0
+          ? t('settings_folders_include_all_cost', { count: pending.rules })
+          : pending.rules === 0
+            ? t('settings_all_gitignored', { count: pending.gitignored })
+            : `${t('settings_folders_include_all_cost', { count: pending.rules })} ${t('settings_all_gitignored', { count: pending.gitignored })}`,
         confirmLabel: t('settings_folders_confirm'),
         confirmAriaLabel: t('settings_folders_confirm_include_named', { path }),
         cancelLabel: t('settings_folders_confirm_cancel'),
@@ -1600,7 +1659,10 @@
       heading:
         pending.kind === 'exclude'
           ? t('settings_folders_confirm_exclude_heading', { path })
-          : t('settings_folders_confirm_include_heading', { path }),
+          // PR 3: no rule of the person's holds a row `.gitignore` names.
+          : pending.gitignored && !pending.pushDown
+            ? t('settings_folders_confirm_gitignored_heading', { path })
+            : t('settings_folders_confirm_include_heading', { path }),
       cost:
         pending.kind === 'exclude'
           ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
@@ -1614,6 +1676,10 @@
           // say the opposite.
           : pending.pushDown
             ? t('settings_folders_include_cost_push_down', { path })
+          // PR 3: no rule of the person's holds it — `.gitignore` does, and
+          // the answer stores an include past it.
+          : pending.gitignored
+            ? t('settings_include_gitignored', { path })
           : pending.heldAbove !== null
             ? t('settings_subfolder_excluded_by_ancestor', { prefix: pending.heldAbove })
           : pending.existsOnDisk
@@ -1799,7 +1865,11 @@
                 else if (row.control === 'exclude') askExclude(rootId, row.entry.relativePath);
                 // `true`: this row is a directory entry `list_subfolders` read off
                 // the disk, so the folder is there. See `askInclude`.
-                else askInclude(rootId, row.entry.relativePath, true, row.entry.state.kind === 'excludedByAncestor');
+                else askInclude(
+                  rootId, row.entry.relativePath, true,
+                  row.entry.state.kind === 'excludedByAncestor', false,
+                  row.entry.state.kind === 'gitIgnored',
+                );
               }} />
           {:else}
             <span class="check-slot"></span>

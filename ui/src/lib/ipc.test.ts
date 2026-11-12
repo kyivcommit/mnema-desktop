@@ -504,11 +504,15 @@ const byTag: Record<SubfolderState['kind'], SubfolderState> = {
   unusableName: { kind: 'unusableName' },
   masked: { kind: 'masked', mask: '*.log' },
   notRead: { kind: 'notRead' },
+  gitIgnored: { kind: 'gitIgnored', by: 'build' },
+  gitIgnoredOpen: { kind: 'gitIgnoredOpen', by: 'build' },
+  gitIncluded: { kind: 'gitIncluded', include: 'build/keep.txt' },
 };
 
-test('SubfolderState carries every state the shell can send, and exactly those eight', () => {
+test('SubfolderState carries every state the shell can send, and exactly those eleven', () => {
   expect(Object.keys(byTag).sort()).toEqual(
-    ['builtIn', 'excluded', 'excludedByAncestor', 'masked', 'notRead', 'open', 'symlink', 'unusableName'],
+    ['builtIn', 'excluded', 'excludedByAncestor', 'gitIgnored', 'gitIgnoredOpen', 'gitIncluded',
+      'masked', 'notRead', 'open', 'symlink', 'unusableName'],
   );
   // The payload the ancestor state carries is the whole reason that row can
   // name the rule holding it.
@@ -565,7 +569,7 @@ test('TreeRoot is exactly what tree.rs defines, field for field', () => {
   );
 });
 const TICKS_RS = readFileSync(join(HERE, '../../../src-tauri/src/ticks.rs'), 'utf8');
-const RULE_CHANGE_FIXTURE: RuleChange = { added: [], removed: [] };
+const RULE_CHANGE_FIXTURE: RuleChange = { added: [], removed: [], included: [], unincluded: [] };
 test('RuleChange and Tick are exactly what ticks.rs defines', () => {
   expect(Object.keys(RULE_CHANGE_FIXTURE).sort()).toEqual(
     rustStructFields(TICKS_RS, 'RuleChange').map(camelOfSnake).sort(),

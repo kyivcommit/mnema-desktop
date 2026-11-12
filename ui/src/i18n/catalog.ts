@@ -83,6 +83,10 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
   | 'settings_folders_include_cost_push_down' | 'settings_folders_include_all_cost'
   | 'settings_entry_masked' | 'settings_entry_failed' | 'settings_entry_failed_below'
+  | 'settings_entry_gitignore' | 'settings_entry_gitignore_included'
+  | 'settings_subfolder_gitignored' | 'settings_subfolder_gitignored_open'
+  | 'settings_subfolder_git_included' | 'settings_include_gitignored' | 'settings_all_gitignored'
+  | 'settings_folders_confirm_gitignored_heading'
   | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
@@ -217,7 +221,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
     settings_folders_remove_selected: 'Видалити виділену теку',
-    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку чи файл.',
+    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку чи файл. Те, що названо в .gitignore, спочатку без галки — відмітьте, щоб індексувати все одно.',
     settings_folders_root_all: 'Усе індексується',
     settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
@@ -680,6 +684,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_entry_masked: 'маска {mask}',
     settings_entry_failed: '⚠ не прочитано',
     settings_entry_failed_below: '⚠ не прочитано: {count}',
+    settings_entry_gitignore: 'gitignore',
+    settings_entry_gitignore_included: 'gitignore · включено',
+    settings_subfolder_gitignored: 'Не індексується: його називає .gitignore ({by}). Відмітьте, щоб індексувати все одно.',
+    settings_subfolder_gitignored_open: 'Його називає .gitignore ({by}); індексується лише відмічене всередині.',
+    settings_subfolder_git_included: 'Індексується попри .gitignore.',
+    settings_include_gitignored: '{path} названо в .gitignore. Індексувати попри це? Текст цього шляху піде на наступному скані туди ж, куди й решта.',
+    settings_all_gitignored: 'Почне індексуватися назване в .gitignore: {count}.',
+    settings_folders_confirm_gitignored_heading: 'Індексувати {path}?',
     settings_folders_include_cost_held_below: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
     // 🔴 Рев'ю раунду 1 (I1): те саме вікно вже знає, що теки за цим шляхом
     // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`) і саме з
@@ -1274,7 +1286,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_remove_selected: 'Remove the selected folder',
-    settings_folders_tree_hint: 'Untick a folder or a file to keep it out of the index.',
+    settings_folders_tree_hint: 'Untick a folder or a file to keep it out of the index. What .gitignore names starts unticked — tick it to index it anyway.',
     settings_folders_root_all: 'Everything is indexed',
     settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
@@ -1487,6 +1499,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_entry_masked: 'mask {mask}',
     settings_entry_failed: '⚠ scan failed',
     settings_entry_failed_below: '⚠ {count} failed',
+    settings_entry_gitignore: 'gitignore',
+    settings_entry_gitignore_included: 'gitignore · included',
+    settings_subfolder_gitignored: 'Not indexed: .gitignore names it ({by}). Tick it to index it anyway.',
+    settings_subfolder_gitignored_open: '.gitignore names it ({by}); only what is ticked inside is indexed.',
+    settings_subfolder_git_included: 'Indexed despite .gitignore.',
+    settings_include_gitignored: '.gitignore names {path}. Index it anyway? Its text goes on the next scan wherever the rest goes.',
+    settings_all_gitignored: 'Named by .gitignore and starting to be indexed: {count}.',
+    settings_folders_confirm_gitignored_heading: 'Index {path}?',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
     settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',

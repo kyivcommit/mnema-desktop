@@ -1944,6 +1944,24 @@ mod tests {
                     failed_below: 4,
                     ..row("slow", SubfolderState::Open)
                 },
+                row(
+                    "build",
+                    SubfolderState::GitIgnored {
+                        by: "Work/build".to_string(),
+                    },
+                ),
+                row(
+                    "dist",
+                    SubfolderState::GitIgnoredOpen {
+                        by: "Work/dist".to_string(),
+                    },
+                ),
+                row(
+                    "keep.log",
+                    SubfolderState::GitIncluded {
+                        include: "Work/keep.log".to_string(),
+                    },
+                ),
             ],
             unnameable: 2,
         }
@@ -2305,6 +2323,9 @@ mod tests {
             "masked",
             "notRead",
             "open",
+            "gitIgnored",
+            "gitIgnoredOpen",
+            "gitIncluded",
         ];
         assert_eq!(
             rows.len(),
@@ -2318,6 +2339,9 @@ mod tests {
         // The prefix the row promises to name, and the value of it.
         assert_eq!(rows[2]["state"]["prefix"], "Work", "{v}");
         assert_eq!(rows[6]["state"]["mask"], "*.log", "{v}");
+        assert_eq!(rows[9]["state"]["by"], "Work/build", "{v}");
+        assert_eq!(rows[10]["state"]["by"], "Work/dist", "{v}");
+        assert_eq!(rows[11]["state"]["include"], "Work/keep.log", "{v}");
         assert_eq!(rows[6]["isDir"], false, "{v}");
         assert_eq!(rows[0]["isDir"], true, "{v}");
         assert!(rows[0].get("is_dir").is_none(), "{v}");
