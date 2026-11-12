@@ -7,6 +7,7 @@
   import Provider from './Provider.svelte';
   import Folders from './Folders.svelte';
   import Masks from './Masks.svelte';
+  import Apply from './Apply.svelte';
   import JobStrip from './JobStrip.svelte';
   import Scanning from './Scanning.svelte';
   import Application from './Application.svelte';
@@ -423,6 +424,7 @@
              runs once per window, not once per visit; nothing else changes
              about it. -->
         <Masks {jobs} />
+        <Apply {jobs} />
       </div>
       <!-- Task 4, review P2-1: Models joins Folders/Masks above rather than
            the `{#if}` chain below. Its own subscription is `jobs.state.subscribe`

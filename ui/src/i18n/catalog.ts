@@ -7,8 +7,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
-  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint'
-  | 'settings_folders_start_named'
+  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint' | 'settings_folders_apply'
   | 'settings_folders_root_all' | 'settings_folders_root_some'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -68,16 +67,11 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
   | 'settings_folders_expand_named'
-  | 'settings_subfolders_loading' | 'settings_subfolders_none' | 'settings_subfolders_none_indexable'
+  | 'settings_subfolders_loading'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
   | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
   | 'settings_subfolder_index_named'
-  | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
-  | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
-  | 'settings_folders_rule_cost_held_below'
-  | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
-  | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
   | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
   | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
@@ -87,28 +81,26 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_gitignored' | 'settings_subfolder_gitignored_open'
   | 'settings_subfolder_git_included' | 'settings_include_gitignored' | 'settings_all_gitignored'
   | 'settings_folders_confirm_gitignored_heading'
-  | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
   | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
-  | 'settings_folders_removing' | 'settings_folders_remove_blocked'
-  | 'settings_folders_remove_question_withdrawn'
-  | 'settings_folders_added_note' | 'settings_folders_unconfirmed' | 'settings_folders_start'
+  | 'settings_folders_removing'
+  | 'settings_folders_added_note' | 'settings_folders_unconfirmed'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_hint' | 'settings_masks_remove_selected'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
   | 'settings_masks_confirm_add_heading' | 'settings_masks_confirm_remove_heading'
-  | 'settings_masks_add_cost' | 'settings_masks_add_cost_none' | 'settings_masks_remove_cost'
+  | 'settings_masks_add_cost' | 'settings_masks_remove_cost'
   | 'settings_masks_confirm' | 'settings_masks_confirm_cancel'
   | 'settings_masks_confirm_add_named' | 'settings_masks_confirm_remove_named'
   | 'settings_masks_confirm_cancel_named'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
-  | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
-  | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
+  | 'settings_masks_refused_case_note'
+  | 'settings_masks_already_stored'
   | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_probe_running' | 'indexing_model_adoption_running' | 'indexing_summary_fallback'
@@ -222,6 +214,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_add: 'Додати теку',
     settings_folders_remove_selected: 'Видалити виділену теку',
     settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку чи файл. Те, що названо в .gitignore, спочатку без галки — відмітьте, щоб індексувати все одно.',
+    settings_folders_apply: 'Застосувати зміни',
     settings_folders_root_all: 'Усе індексується',
     settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
@@ -553,8 +546,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces.
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
-    settings_subfolders_none: 'У цій теці нічого немає.',
-    settings_subfolders_none_indexable: 'Тут нічого індексувати: сканування ніколи не читає того, що лежить у цій теці.',
     // `unnameable` (tree.rs): записи (теки й файли), чиї назви не є коректним
     // UTF-8, лічать і не показують — назва, зіпсована при показі, більше не
     // відкриває той запис, з якого походить, і правило з неї не виключило б
@@ -589,16 +580,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
     // Назва галки, не дії: «Індексувати Work, позначено» — правда в обох станах.
     settings_subfolder_index_named: 'Індексувати {path}',
-    settings_folders_rules_heading: 'Ваші правила виключення для цієї теки:',
-    settings_folders_rules_none: 'Ви нічого не виключили в цій теці.',
     // Єдине джерело відповіді «чи тека ще на диску» — `existsOnDisk` самого
     // правила (bridge.rs). Порівняння списку правил зі списком підтек одного
     // рівня помилково назве застарілим кожне вкладене правило.
-    settings_folders_rule_gone: 'Наразі за цим шляхом теки немає.',
     // Прибрати правило — це розкриття, а не прибирання: речення стоїть поруч
     // із кнопкою ДО натискання й каже, що станеться далі. Одне речення для
     // обох місць — і для правила у списку, і для перемикача «не виключати».
-    settings_folders_rule_cost: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
     // 🔴 Рев'ю фінальної гілки, I2. Речення вище безумовне, а стан, який йому
     // суперечить, зберігається без жодної відмови: `exclude_subfolder` не має
     // гарди на предка (`bridge.rs:450-483`), а `add_path_exclusion` —
@@ -615,17 +602,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Тому `heldBelow` читає `existsOnDisk` кожного правила: такий виняток
     // применшив би те, що йде провайдеру, а це єдиний напрям, якого D29 не
     // дозволяє.
-    settings_folders_rule_cost_held_below: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
-    settings_folders_rule_remove: 'Прибрати правило',
-    settings_folders_rule_remove_named: 'Прибрати правило на {prefix}',
     // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
     // «Правила вже не було» — не помилка, а факт про екран, який застарів.
-    settings_folders_rule_already_gone: 'Такого правила вже не було. Список перечитано.',
     // PR 8a, Task 8. Числа в питанні заморожені на мить натиску (`Pending`), а
     // сканування — це саме та подія, після якої вони брешуть. Мовчки прибрати
     // питання не можна: натиск людини зник би без сліду. Тому питання знімають
     // і кажуть, про яку теку воно було.
-    settings_folders_question_withdrawn: 'Питання про «{path}» знято: індексацію закінчено, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // ── PR 8a, Task 6: що коштує виключення, сказане ДО збереження ──────────
     //
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
@@ -649,22 +631,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // список лишається таким, яким був. Твердження про сам перечит було
     // неправдою саме в тому стані, заради якого банер існує.
     settings_folders_folder_changed: 'Ця тека вже не та, що була на екрані: її місце посіла інша. Нічого не змінено.',
-    // 🔴 ДВА числа, і вони про різні речі. `paths` — проіндексовані шляхи під
-    // цим префіксом; `documents` — документи, у яких жодного шляху поза ним не
-    // лишається. Документ живий, доки його називає бодай один шлях
-    // (`forget_if_unnamed`, walk.rs), тож рахувати шляхи й називати їх
-    // документами означає завищити втрату. Гілка `=0` — не порожній випадок:
-    // це стан, у якому індекс втрачає шлях і не втрачає жодного документа, і
-    // сказати про це треба словами, а не нулем.
-    // 🔴 Fix round 2, F4. Обидва числа беруться з читання, обмеженого
-    // `status = 'indexed'` — того самого обмеження, про яке маска-побратим
-    // (`settings_masks_add_cost` нижче) чесно попереджає, а це речення
-    // називало своє число без жодного застереження. Додано одну фразу, за
-    // зразком маски й у тій самій її частині: наступне сканування може забрати
-    // більше, бо файли, які так і не проіндексувалися, тут не враховані.
-    // Підмет інший — тека, не маска, — тож формулювання не переписане
-    // дослівно: «кожної теки» тут не було б правдою.
-    settings_folders_exclude_cost: 'Станом на зараз: при наступному скануванні індекс втратить {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} із цієї теки, а {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}. Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    // Власник, 2026-11-12: один рядок — скільки проіндексованих файлів зникне.
+    settings_folders_exclude_cost: '{paths, plural, one {# файл із цієї теки зникне} few {# файли із цієї теки зникнуть} many {# файлів із цієї теки зникнуть} other {# файла із цієї теки зникне}} з пошуку після наступного сканування.',
     // Зворотний бік — і свідомо БЕЗ числа: це вікно не знає, що лежить на диску
     // в теці, яку досі оминали, і вигадане там число було б тим самим
     // завищенням, тільки в інший бік. Зате наслідок відомий точно (D29): текст
@@ -702,7 +670,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Це не вигадування числа — числа тут як не було, так і немає; це той самий
     // факт, уже прочитаний, сказаний у питанні. Наслідок лишається названим, бо
     // тека може повернутися, а правила вже не буде.
-    settings_folders_include_cost_gone: 'Наразі за цим шляхом теки немає, тож зараз нічого не індексується. Якщо тека там з’явиться згодом, вона індексується, а її текст надсилається провайдеру моделі.',
     settings_folders_confirm_exclude_heading: 'Виключити {path}?',
     settings_folders_confirm_include_heading: 'Більше не виключати {path}?',
     settings_folders_confirm: 'Підтвердити',
@@ -739,25 +706,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // кнопок цього рядка, а не поруч із ними: натиснути тут більше нема на що,
     // і кнопка, яка нічого не робить, читається як кнопка, яку не почули.
     settings_folders_removing: 'Видаляємо…',
-    // Одне речення на весь список, поки триває робота: бекенд відмовляє
-    // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
-    // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
-    settings_folders_remove_blocked: 'Кнопка «Видалити» запрацює після зупинки сканування.',
-    // 🔴 Рев'ю раунду 1 (m3). Власний ключ, а не `settings_folders_question_withdrawn`.
-    // Речення те саме за змістом, але останнє підрядне називає, ЩО перечитано:
-    // питання про підтеку живе в панелі, і панель справді перечитують; питання
-    // про видалення живе під списком, і рядок, до якого воно належить, у
-    // звичайному випадку згорнутий — жодної панелі на екрані немає й жодної не
-    // читали. Спільний рядок казав людині про панель, якої вона не бачить.
-    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: індексацію закінчено, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
     // implicit promise used to be, and names the one place a scan now starts.
-    settings_folders_added_note: 'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Почати індексацію».',
-    settings_folders_unconfirmed: 'Ще не індексується. Налаштуйте виключення й маски, потім почніть.',
-    settings_folders_start: 'Почати індексацію',
-    settings_folders_start_named: 'Почати індексацію {path}',
+    settings_folders_added_note: 'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Застосувати зміни» внизу.',
+    settings_folders_unconfirmed: 'Ще не індексується. Налаштуйте виключення й маски, потім застосуйте зміни.',
     settings_masks_heading: 'Маски файлів',
     settings_masks_info_label: 'Як працюють маски',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
@@ -791,74 +745,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'Не вдалося прочитати список масок.',
     settings_masks_confirm_add_heading: 'Додати маску {mask}?',
     settings_masks_confirm_remove_heading: 'Видалити маску {mask}?',
-    // 🔴 Fix round 5, F3, рішення власника: слово «щонайменше» пішло.
-    // Воно обіцяло НИЖНЮ межу, а власні коментарі цього ж коду називають два
-    // стани, у яких число завищене. `.gitignore` у самій теці не входить у
-    // жоден із двох наборів правил (`src-tauri/src/tree.rs`,
-    // `crates/mnema-walk/src/rules.rs`), тож файл, який він і так виключає,
-    // рахується тут як «уцілілий» і це натискання платить за нього; а набір
-    // правил, який не скомпілювався, відповідає ПОРОЖНІМ перекриттям, після
-    // чого `walk_root` спиняється перед фазою 2 і не прибирає нічого взагалі —
-    // екран сказав би «щонайменше N» про сканування, яке прибирає нуль.
-    //
-    // 🔴 І це не залишок, успадкований від попереднього речення, а
-    // регресія, яку внесла fix round 4. Фраза «під цю маску підпадає
-    // щонайменше N файлів» була правдою і при `.gitignore`: виключений файл
-    // усе одно підпадає під маску. Нове речення каже про різницю ПРОТИ
-    // ПРАВИЛ — а `.gitignore` є одним із правил, які застосовує прохід, — тож
-    // його `.gitignore` спростувати може, а попереднє не міг.
-    //
-    // 🔴 Занижує число теж, і це той самий вимір, що й раніше:
-    // `mask_preview.paths` рахує лише рядки зі `status = 'indexed'`
-    // (`write.rs`), а множина, яку звіряє прохід, статусу не питає — тож файл
-    // документа в стані `pending`, `failed` чи `skipped` прохід прибере, а
-    // прев'ю його не показало. Тому остання фраза застерігає в ОБИДВА боки
-    // одним реченням: число не межа ні знизу, ні згори.
-    //
-    // 🔴 Fix round 4, F1: змінилося САМЕ ЧИСЛО, тому мусило змінитися й
-    // речення. `mask_preview` більше не рахує «скільки файлів підпадає під цю
-    // маску» — воно рахує РІЗНИЦЮ, яку робить це натискання проти всього
-    // набору правил, що його застосує наступне сканування. Файл, який уже
-    // забирає збережене правило, у число не входить, тож стара фраза «під цю
-    // маску підпадає N файлів» стала б меншою за правду.
-    //
-    // 🔴 Fix round 7, F1, рішення власника: гілка `=0` для документів ПОРОЖНЯ.
-    // Три кола поспіль ставили сюди твердження, яке не витримує арифметики, і
-    // щоразу воно применшувало втрату. Причина не в словах: `mask_preview`
-    // рахує РІЗНИЦЮ між двома наборами правил, а людина питає про світ, і два
-    // механізми поза обома наборами забирають у документа останній шлях, який
-    // це число називає збереженим — `.gitignore` у самій теці (шлях під ним
-    // рахується як «уцілілий») і статус: `Db::indexed_files_under_root`
-    // (`crates/mnema-index/src/write.rs`) бере лише `d.status = 'indexed'`, тож
-    // єдиний шлях документа в стані `pending`, `failed` чи `skipped` узагалі
-    // поза цією множиною. Тому при нулі речення — це число файлів і
-    // двобічне застереження, і про документи воно не каже нічого. Кому «і»
-    // винесено ВСЕРЕДИНУ ненульових гілок, щоб порожня лишала ціле речення.
-    settings_masks_add_cost: 'Станом на зараз ця маска забирає {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила{documents, plural, =0 {} one {, і # документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {, і # документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {, і # документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {, і # документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований.',
-    // Нуль має власне речення, і після fix round 7 причина цьому одна —
-    // ЗАСТЕРЕЖЕННЯ, а не гілка `=0` для документів, якої більше немає. Сусіднє
-    // речення хеджує в обидва боки, бо його число буває завищеним; тут число —
-    // нуль, і завищеним воно не буває. І нуль тут тепер означає
-    // «нічого понад те, що вже забирають ваші правила», а не «під цю маску не
-    // підпадає жоден файл»: додати «*.txt» там, де вже збережено «*», дає
-    // саме цей нуль, а файли під маску підпадають.
-    //
-    // Fix round 5, F3: тут «щонайменше» не було й нема чого знімати, і
-    // застереження свідомо лишається ОДНОБІЧНИМ. Завищення, через яке сусіднє
-    // речення хеджує в обидва боки, може зробити число лише більшим за правду,
-    // а тут число — нуль: менше воно не буває. Обидва речення читаються як одне
-    // й те саме твердження про той самий залишок, тільки це не обіцяє
-    // напрямку, якого не існує.
-    settings_masks_add_cost_none: 'Станом на зараз ця маска не забирає нічого понад те, що вже забирають ваші правила. Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, тут не враховані.',
-    // 🔴 Fix round 4, F3. Речення обіцяло те, чого екран знати не може: з
-    // «*.pdf» і «report.*» у сховищі видалення будь-якої з них лишає
-    // `report.pdf` виключеним. Полічити це неможливо, і це не обмеження, яке
-    // треба обійти — файли, які маска стримувала, В ІНДЕКСІ ВІДСУТНІ, тож
-    // жодне читання індексу їх не перелічить (тому на цьому боці й немає
-    // прев'ю). Одне речення, безумовно чесне, а не дві гілки за ознакою «чи є
-    // ще правило»: «є ще правило» — це не «є правило, що бере ті самі файли»,
-    // а другого без імен файлів не знати.
-    settings_masks_remove_cost: 'Від наступного сканування кожної теки ця маска більше нічого не стримує: кожен файл, який вона виключала, індексується знову — якщо його не виключає ще якесь ваше правило, — і його текст надсилається провайдеру моделі.',
+    // Власник, 2026-11-12: один рядок, як для теки; на нулі питання немає.
+    settings_masks_add_cost: '{paths, plural, one {# файл зникне} few {# файли зникнуть} many {# файлів зникнуть} other {# файла зникне}} з пошуку після наступного сканування.',
+    // Повернення маски — напрям D29, тож питання лишається й називає провайдера.
+    settings_masks_remove_cost: 'Від наступного сканування файли, які виключала лише ця маска, індексуються знову, а їхній текст надсилається провайдеру моделі.',
     settings_masks_confirm: 'Підтвердити',
     settings_masks_confirm_cancel: 'Скасувати',
     settings_masks_confirm_add_named: 'Підтвердити додавання маски {mask}',
@@ -873,7 +763,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_store: 'Маску {mask} не збережено. Ось що відповів індекс:',
     settings_masks_refused_remove: 'Маску {mask} не видалено. Ось що відповів індекс:',
     settings_masks_refused_case_note: 'У цій відповіді маска може бути записана іншим регістром, ніж ви ввели: маски порівнюються без урахування регістру.',
-    settings_masks_already_gone: 'Такої маски вже не було. Список перечитано.',
     // 🔴 Близнюк рядка вище, і той самий клас: «нічого не додано» — це окреме
     // речення, а не мовчання. Сховище розрізняє рядки побайтово, а прохід
     // порівнює маски згорнуто, тож «*.PDF» і «*.pdf» — це два можливі рядки й
@@ -881,10 +770,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
     // знайшла б його.
     settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
-    // 🔴 Власний ключ, а не `settings_folders_question_withdrawn`: там панель
-    // ПЕРЕЧИТАНО, а тут застарів РОЗРАХУНОК — питання про маску несе число,
-    // яке дав `mask_preview` до того, як індексація змінила набір документів.
-    settings_masks_question_withdrawn: 'Питання про маску «{mask}» знято: індексацію закінчено, і розрахунок застарів. Натисніть ще раз, якщо це досі потрібно.',
     // Task 7 — the live reading phase names the folder it is on, one-based the
     // way `scan_job.rs`'s own comment states it ("3 of 7" is what a person
     // reads, and `rootIndex` is the folder being read now, not how many are
@@ -1287,6 +1172,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_add: 'Add a folder',
     settings_folders_remove_selected: 'Remove the selected folder',
     settings_folders_tree_hint: 'Untick a folder or a file to keep it out of the index. What .gitignore names starts unticked — tick it to index it anyway.',
+    settings_folders_apply: 'Apply changes',
     settings_folders_root_all: 'Everything is indexed',
     settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
@@ -1464,8 +1350,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_days: '{count, plural, one {# day} other {# days}} ago',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
-    settings_subfolders_none: 'This folder is empty.',
-    settings_subfolders_none_indexable: 'Nothing here can be indexed: the scan never reads what this folder holds.',
     settings_subfolders_unnameable: '{count, plural, one {# item is not listed: its name could not be read as text.} other {# items are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
@@ -1474,15 +1358,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     // The tick's name, not an action: "Index Work, checked" is true in both states.
     settings_subfolder_index_named: 'Index {path}',
-    settings_folders_rules_heading: 'Your exclusion rules for this folder:',
-    settings_folders_rules_none: 'You have not excluded anything in this folder.',
-    settings_folders_rule_gone: 'There is no folder at this path right now.',
-    settings_folders_rule_cost: 'Without this rule, anything at this path is indexed again from the next scan on.',
-    settings_folders_rule_cost_held_below: 'Without this rule, anything at this path is indexed again from the next scan on — except what your other rules further down this path still exclude.',
-    settings_folders_rule_remove: 'Remove the rule',
-    settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
-    settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
-    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: indexing has finished and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_include_checking: 'Checking that this is still the same folder…',
     // 🔴 Fix round 6. Used to also claim "and the list has been re-read" —
@@ -1492,7 +1367,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // it was. The re-read claim was false in the one state this banner exists
     // for.
     settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed.',
-    settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The scan can remove more than that: files that never finished indexing are not counted here.',
+    settings_folders_exclude_cost: '{paths, plural, one {# file} other {# files}} from this folder will disappear from search after the next scan.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
     settings_folders_include_cost_push_down: 'From the next scan on, "{path}" is indexed and its text is sent to the model provider. Everything else in the folders above it stays excluded — but new files added there later are indexed.',
     settings_folders_include_all_cost: 'From the next scan on, everything inside this folder is indexed and its text is sent to the model provider: {count} exclusion rules under it are removed.',
@@ -1508,7 +1383,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_all_gitignored: 'Named by .gitignore and starting to be indexed: {count}.',
     settings_folders_confirm_gitignored_heading: 'Index {path}?',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
-    settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',
     settings_folders_confirm_include_heading: 'Stop excluding {path}?',
     settings_folders_confirm: 'Confirm',
@@ -1519,12 +1393,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_remove: '{files, plural, one {Remove folder {path} from the index? # file from this folder will disappear from search.} other {Remove folder {path} from the index? # files from this folder will disappear from search.}}',
     settings_folders_confirm_remove_named: 'Confirm removing {path}',
     settings_folders_removing: 'Removing…',
-    settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
-    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
-    settings_folders_added_note: 'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
-    settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then start.',
-    settings_folders_start: 'Start indexing',
-    settings_folders_start_named: 'Start indexing {path}',
+    settings_folders_added_note: 'Folder added. Untick what should stay out, set masks, then press “Apply changes” at the bottom.',
+    settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then apply changes.',
     settings_masks_heading: 'File masks',
     settings_masks_info_label: 'How masks work',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
@@ -1539,9 +1409,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'The list of masks could not be read.',
     settings_masks_confirm_add_heading: 'Add the mask {mask}?',
     settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
-    settings_masks_add_cost: 'As of now this mask takes {paths, plural, one {# file} other {# files}} beyond what your rules already take{documents, plural, =0 {} one {, and # document stops being findable: no other path will be left naming it} other {, and # documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that or fewer: files that never finished indexing are not counted here, and a file a .gitignore in the folder itself already excludes may be counted here.',
-    settings_masks_add_cost_none: 'As of now this mask takes nothing beyond what your rules already take. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
-    settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',
+    settings_masks_add_cost: '{paths, plural, one {# file} other {# files}} will disappear from search after the next scan.',
+    settings_masks_remove_cost: 'From the next scan, files only this mask excluded are indexed again and their text is sent to the model provider.',
     settings_masks_confirm: 'Confirm',
     settings_masks_confirm_cancel: 'Cancel',
     settings_masks_confirm_add_named: 'Confirm adding the mask {mask}',
@@ -1551,9 +1420,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_store: 'The mask {mask} was not stored. This is what the index answered:',
     settings_masks_refused_remove: 'The mask {mask} was not removed. This is what the index answered:',
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
-    settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
-    settings_masks_question_withdrawn: 'The question about mask “{mask}” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
     indexing_reading_root: 'Indexing folder {rootIndex} of {rootCount}: {rootPath}',
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
