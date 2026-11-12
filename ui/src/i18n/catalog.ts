@@ -73,10 +73,10 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
   | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
   | 'settings_subfolder_index_named'
-  | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
-  | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
-  | 'settings_folders_rule_cost_held_below'
-  | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
+ 
+ 
+ 
+ 
   | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
   | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
   | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
@@ -87,7 +87,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_gitignored' | 'settings_subfolder_gitignored_open'
   | 'settings_subfolder_git_included' | 'settings_include_gitignored' | 'settings_all_gitignored'
   | 'settings_folders_confirm_gitignored_heading'
-  | 'settings_folders_include_cost_gone'
+ 
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
@@ -589,16 +589,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
     // Назва галки, не дії: «Індексувати Work, позначено» — правда в обох станах.
     settings_subfolder_index_named: 'Індексувати {path}',
-    settings_folders_rules_heading: 'Ваші правила виключення для цієї теки:',
-    settings_folders_rules_none: 'Ви нічого не виключили в цій теці.',
     // Єдине джерело відповіді «чи тека ще на диску» — `existsOnDisk` самого
     // правила (bridge.rs). Порівняння списку правил зі списком підтек одного
     // рівня помилково назве застарілим кожне вкладене правило.
-    settings_folders_rule_gone: 'Наразі за цим шляхом теки немає.',
     // Прибрати правило — це розкриття, а не прибирання: речення стоїть поруч
     // із кнопкою ДО натискання й каже, що станеться далі. Одне речення для
     // обох місць — і для правила у списку, і для перемикача «не виключати».
-    settings_folders_rule_cost: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
     // 🔴 Рев'ю фінальної гілки, I2. Речення вище безумовне, а стан, який йому
     // суперечить, зберігається без жодної відмови: `exclude_subfolder` не має
     // гарди на предка (`bridge.rs:450-483`), а `add_path_exclusion` —
@@ -615,9 +611,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Тому `heldBelow` читає `existsOnDisk` кожного правила: такий виняток
     // применшив би те, що йде провайдеру, а це єдиний напрям, якого D29 не
     // дозволяє.
-    settings_folders_rule_cost_held_below: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
-    settings_folders_rule_remove: 'Прибрати правило',
-    settings_folders_rule_remove_named: 'Прибрати правило на {prefix}',
     // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
     // «Правила вже не було» — не помилка, а факт про екран, який застарів.
     settings_folders_rule_already_gone: 'Такого правила вже не було. Список перечитано.',
@@ -702,7 +695,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Це не вигадування числа — числа тут як не було, так і немає; це той самий
     // факт, уже прочитаний, сказаний у питанні. Наслідок лишається названим, бо
     // тека може повернутися, а правила вже не буде.
-    settings_folders_include_cost_gone: 'Наразі за цим шляхом теки немає, тож зараз нічого не індексується. Якщо тека там з’явиться згодом, вона індексується, а її текст надсилається провайдеру моделі.',
     settings_folders_confirm_exclude_heading: 'Виключити {path}?',
     settings_folders_confirm_include_heading: 'Більше не виключати {path}?',
     settings_folders_confirm: 'Підтвердити',
@@ -1474,13 +1466,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     // The tick's name, not an action: "Index Work, checked" is true in both states.
     settings_subfolder_index_named: 'Index {path}',
-    settings_folders_rules_heading: 'Your exclusion rules for this folder:',
-    settings_folders_rules_none: 'You have not excluded anything in this folder.',
-    settings_folders_rule_gone: 'There is no folder at this path right now.',
-    settings_folders_rule_cost: 'Without this rule, anything at this path is indexed again from the next scan on.',
-    settings_folders_rule_cost_held_below: 'Without this rule, anything at this path is indexed again from the next scan on — except what your other rules further down this path still exclude.',
-    settings_folders_rule_remove: 'Remove the rule',
-    settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
     settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: indexing has finished and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
@@ -1508,7 +1493,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_all_gitignored: 'Named by .gitignore and starting to be indexed: {count}.',
     settings_folders_confirm_gitignored_heading: 'Index {path}?',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
-    settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',
     settings_folders_confirm_include_heading: 'Stop excluding {path}?',
     settings_folders_confirm: 'Confirm',

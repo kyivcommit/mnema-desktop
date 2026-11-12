@@ -5,7 +5,7 @@
   import { locale, t } from '../i18n';
   import {
     listTree, addWatchedFolder, removeWatchedFolder, confirmWatchedFolder,
-    listSubfolders, listExclusions, includeSubfolder, setTick, previewTick,
+    listSubfolders, listExclusions, setTick, previewTick,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
@@ -114,7 +114,7 @@
   // alias SQLite hands out again, so an id alone could select another folder.
   let chosen = $state<{ rootId: number; path: string } | null>(null);
   // Whether a root holds any rule of the person's own whose folder is there,
-  // as last read for that path. Kept after its panel is shut, so a collapsed
+  // or a top-level row `.gitignore` names, as last read for that path. Kept after its panel is shut, so a collapsed
   // root still shows `–` (spec, owner's ruling 5). Only this window writes
   // rules, and it re-reads the panel when it does, so the record is current
   // for as long as nothing else can move it.
@@ -194,31 +194,23 @@
     // `all` waits on the same identity check as `include` and reads its words.
     | { kind: 'checking'; path: string; of: 'exclude' | 'include' | 'all' }
     | { kind: 'exclude'; path: string; paths: number; documents: number }
-    // `existsOnDisk` is carried, not looked up when the question is drawn, for
+    // `heldBelow` is carried, not looked up when the question is drawn, for
     // the same reason `paths`/`documents` are: the question states what was
-    // true when it was asked, and a re-read landing underneath it must not
-    // silently change the sentence a person is in the middle of reading. It is
-    // the RULE's own field, never re-derived here (`ipc.ts:118`).
-    // `heldBelow` is carried for the same reason, and answers a different
-    // question: whether removing THIS rule still leaves rules of the person's
-    // own further down the same path. See `heldBelow` for why the sentence
-    // needs it.
+    // true when it was asked. It answers whether removing THIS rule still
+    // leaves rules of the person's own further down the same path. See
+    // `heldBelow` for why the sentence needs it.
     //
-    // `heldAbove` is its mirror and is frozen alongside it, carrying the
-    // ancestor's prefix rather than a flag because the sentence names it. See
-    // `heldAbove`.
+    // Only tree rows ask now (the rule list left the tree, owner 2026-11-12):
+    // a row IS on disk, and an `excluded` row has no rule above it (the
+    // listing reports an ancestor first), so neither "gone" nor "held from
+    // above" can be the answer and neither is carried.
     //
     // `pushDown` (folders tree PR 2): the row sits under an excluded folder, so
     // ticking it takes that folder's rule away and rules out the siblings
     // instead — the sentence has to say new files there are indexed later.
     | {
-        kind: 'include'; path: string; existsOnDisk: boolean;
-        heldBelow: boolean; heldAbove: string | null; pushDown: boolean;
-        // Pressed in the RULE LIST: the answer removes that one stored rule
-        // (`include_subfolder`), never a tick — a rule whose folder is gone has
-        // no row for `set_tick` to find, and one under another rule would be
-        // pushed down over every sibling (PR #101 review).
-        fromRule: boolean;
+        kind: 'include'; path: string;
+        heldBelow: boolean; pushDown: boolean;
         // Folders tree PR 3: the row is one `.gitignore` holds, so the answer
         // stores an include and the sentence says so.
         gitignored: boolean;
@@ -273,9 +265,14 @@
   function patch(rootId: number, fields: Partial<Panel>) {
     const panel = panels[rootId];
     if (panel === undefined) return; // the row was shut while this was running
-    panels = { ...panels, [rootId]: { ...panel, ...fields } };
-    if (fields.rules) {
-      marks = { ...marks, [rootId]: { path: panel.rootPath, some: fields.rules.some((r) => r.existsOnDisk) } };
+    const next = { ...panel, ...fields };
+    panels = { ...panels, [rootId]: next };
+    if ((fields.rules || fields.tree) && next.rules) {
+      // A top-level row `.gitignore` names counts as unticked (owner's ruling
+      // 2026-11-12), as it does for a folder's mixed box.
+      const some = next.rules.some((r) => r.existsOnDisk)
+        || (next.tree?.listing.entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen') ?? false);
+      marks = { ...marks, [rootId]: { path: panel.rootPath, some } };
     }
   }
 
@@ -474,9 +471,8 @@
   //
   // 🔴 Fix round 2, A2: `existsOnDisk`, and it is the same direction again. The
   // softened sentence promises an EXCEPTION, and without this filter the rule
-  // backing that promise could be one the same panel labels "There is no folder
-  // at this path right now" two rows down (`settings_folders_rule_gone`, drawn
-  // from this very field). At the next scan such a rule excludes nothing, so
+  // backing that promise could name a path with nothing on disk. At the next
+  // scan such a rule excludes nothing, so
   // the exception understates what reaches the provider — the one direction
   // D29 does not allow, and the reason this is filtered rather than left with a
   // written excuse. Dropping the exception selects the unconditional sentence,
@@ -492,56 +488,6 @@
       && rules.some((rule) => rule.existsOnDisk && under(rule.prefix, prefix));
   }
 
-  // 🔴 Fix round 2, A1. The MIRROR of `heldBelow`, and it exists because the
-  // relation is symmetric and round 1 read one side of it: a rule with one of
-  // the person's own rules ABOVE it releases nothing when it goes, because the
-  // walk is already pruning at the ancestor. Both cost sentences claimed the
-  // opposite, unconditionally, in a state the same two presses reach in the
-  // other order.
-  //
-  // Returns the prefix rather than a boolean, because the sentence it selects
-  // NAMES the rule that has to go first — a row saying "held by a rule" without
-  // saying which leaves the person nothing to go and remove.
-  //
-  // 🔴 The OUTERMOST ancestor, and matching `tree.rs:755-759` is the whole
-  // point: the tree row for `Archive/Held` says "held by your rule on Archive",
-  // and a rule list naming `Archive/Held`'s own nearest ancestor instead would
-  // put two different instructions about one path back on one screen — which is
-  // the defect this fixes. Same evidence as there, too: `list_exclusions`
-  // arrives sorted (`write.rs:580`), and the ancestors of one path form a chain
-  // in which each is a string prefix of the next, so the first match in that
-  // order is the shallowest.
-  //
-  // 🔴 No `existsOnDisk` here, and the asymmetry with `heldBelow` is deliberate
-  // rather than an oversight. That one filters because a gone rule excludes
-  // nothing at the next scan; this one is not a claim about what the ancestor
-  // rule excludes, it is the fact that removing THIS rule changes nothing while
-  // that one stands — true whatever is on disk, since the ancestor's own
-  // pattern prunes the subtree the moment a folder appears there.
-  //
-  // `null` for a failed read, for `heldBelow`'s reason and with its direction:
-  // no ancestor named, so the unconditional sentence stands.
-  function heldAbove(rules: StoredExclusion[] | null, prefix: string): string | null {
-    return rules?.find((rule) => under(prefix, rule.prefix))?.prefix ?? null;
-  }
-
-  // The disclosure beside a "remove this rule" control, in its three forms. One
-  // function for both places that draw it — the rule list and the subfolder
-  // row a rule names — so the two cannot disagree about the same path.
-  //
-  // A rule held from above comes first, and over the softening rather than
-  // beside it: with an ancestor rule standing, "except what your other rules
-  // further down still exclude" would still promise that the REST comes back,
-  // and none of it does.
-  function ruleCostLabel(rules: StoredExclusion[] | null, prefix: string): string {
-    const ancestor = heldAbove(rules, prefix);
-    if (ancestor !== null) {
-      return t('settings_subfolder_excluded_by_ancestor', { prefix: ancestor });
-    }
-    return heldBelow(rules, prefix)
-      ? t('settings_folders_rule_cost_held_below')
-      : t('settings_folders_rule_cost');
-  }
 
   // The two numbers, from ONE `list_tree` reply, and they are about different
   // things.
@@ -705,32 +651,12 @@
   // here would be invented; what IS known is the consequence, and that is what
   // the sentence states.
   //
-  // 🔴 One fact is not invented either, because the window already has it:
-  // whether there is a folder at this path at all. The panel prints
-  // `settings_folders_rule_gone` from the backend's own `existsOnDisk`
-  // (`bridge.rs:117`) in the rule list further down the same panel, so a
-  // question promising the provider will get this folder's text contradicted
-  // the same panel's own data (review round 1, I1).
-  //
-  // 🔴 It is an ARGUMENT, not a lookup, and the two callers answer it from
-  // different evidence — which is why neither can be written as a search
-  // through `panel.rules` with a default. The rules list hands over the rule's
-  // own field, never re-derived here (`ipc.ts:118`). A subfolder row hands over
-  // `true` because the row IS a directory entry `list_subfolders` read off the
-  // disk when the panel was drawn — the same kind of snapshot `existsOnDisk`
-  // itself is. A `find` over `panel.rules` would collapse both into one answer
-  // plus a fallback for a state that cannot happen — `read` fills `tree` and
-  // `rules` from one `Promise.all`, so a rendered row and a null rule list do
-  // not coexist, and a default no test can reach is a guard that cannot fail.
   async function askInclude(
-    rootId: number, path: string, existsOnDisk: boolean, pushDown = false, fromRule = false,
-    gitignored = false,
+    rootId: number, path: string, pushDown = false, gitignored = false,
   ) {
     // Captured before the await for `askExclude`'s reason, and `rules` is read
     // from that same capture on purpose: the question states what was true when
-    // it was ASKED, exactly as the `existsOnDisk` its caller hands over at the
-    // moment of the press does. Reading one half of the sentence from after the
-    // await and the other from before it is how the two come to disagree.
+    // it was ASKED.
     const panel = panels[rootId];
     if (panel === undefined) return;
     const generation = ask(rootId);
@@ -759,20 +685,12 @@
       return;
     }
     patch(rootId, {
-      // Read from `panel.rules` here and NOT handed over by the caller, which
-      // is the opposite of `existsOnDisk` one line up — and the difference is
-      // the evidence, not a change of mind. `existsOnDisk` has two answers
-      // from two kinds of snapshot; this one is a question about the STORED
-      // SET, which both callers would have to answer from that same list —
-      // read from the capture two lines up, not from `panels[rootId]` here, so
-      // it is one `await` stale if a re-read landed during `listTree()`, for
-      // the same reason `existsOnDisk` is (see above).
+      // From the capture two lines up, not from `panels[rootId]` here: the
+      // question states what was true when it was asked.
       pending: {
-        kind: 'include', path, existsOnDisk,
+        kind: 'include', path,
         heldBelow: heldBelow(panel.rules, path),
-        heldAbove: heldAbove(panel.rules, path),
         pushDown,
-        fromRule,
         gitignored,
       },
     });
@@ -850,7 +768,7 @@
       case 'include':
         ask(rootId);
         patch(rootId, { pending: null });
-        await include(rootId, pending.path, pending.fromRule ? 'rule' : 'on');
+        await include(rootId, pending.path, 'on');
         return;
       case 'all':
         ask(rootId);
@@ -885,7 +803,7 @@
     await read(rootId, want);
   }
 
-  async function include(rootId: number, path: string, tick: 'on' | 'all' | 'rule') {
+  async function include(rootId: number, path: string, tick: 'on' | 'all') {
     const panel = panels[rootId];
     if (panel === undefined) return;
     const want = openPathsOf(panel.tree);
@@ -893,19 +811,13 @@
     try {
       // One `set_tick`: a push-down is decided and written by the shell in one
       // transaction, never as several calls from here (spec C).
-      if (tick === 'rule') {
-        // Removing a rule must always work, including one whose folder is
-        // gone or one an older build stored (`bridge.rs`, `include_subfolder`).
-        patch(rootId, { alreadyGone: !(await includeSubfolder(rootId, path)) });
-      } else {
-        const change = await setTick(rootId, path, tick);
-        // All four sets: a tick that only stores or drops an include changed
-        // something too (PR #102 review).
-        patch(rootId, {
-          alreadyGone: change.added.length === 0 && change.removed.length === 0
-            && change.included.length === 0 && change.unincluded.length === 0,
-        });
-      }
+      const change = await setTick(rootId, path, tick);
+      // All four sets: a tick that only stores or drops an include changed
+      // something too (PR #102 review).
+      patch(rootId, {
+        alreadyGone: change.added.length === 0 && change.removed.length === 0
+          && change.included.length === 0 && change.unincluded.length === 0,
+      });
     } catch (e) {
       patch(rootId, { actionError: message(e) });
     }
@@ -1513,6 +1425,24 @@
     }
   }
 
+  // A popup takes the keyboard when it opens — on "Cancel", the answer that
+  // changes nothing — and hands it back to what had it when it closes.
+  function dialogFocus(node: HTMLElement) {
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // The Cancel button focuses itself (`focusCancel`), also when it appears
+    // later — after the "checking" line. Only an empty dialog takes it here.
+    if (!node.contains(document.activeElement)) node.focus();
+    return {
+      destroy() {
+        before?.focus();
+      },
+    };
+  }
+
+  function focusCancel(node: HTMLElement) {
+    node.focus();
+  }
+
   type SubRow = {
     entry: Subfolder;
     sentence: string;
@@ -1529,7 +1459,6 @@
     // a COLLAPSED folder (open, its rows say it themselves). `title` carries
     // the reason the scan recorded.
     mark: { text: string; title: string | null } | null;
-    costLabel: string | null;
     expandable: boolean;
     excluded: boolean;
     expandAriaLabel: string;
@@ -1575,17 +1504,6 @@
             : entry.isDir && child === undefined && entry.failedBelow > 0
               ? { text: t('settings_entry_failed_below', { count: entry.failedBelow }), title: null }
               : null,
-        // The disclosure sits beside the control BEFORE it is pressed: taking a
-        // rule away is not a tidy-up, it puts a subtree back in front of the
-        // next scan.
-        //
-        // Only on the row whose OWN rule the tick removes (`excluded`): under an
-        // excluded folder every row is held from above, and the rule list names
-        // it. `subfolder_state` reports an ancestor before the entry's own rule,
-        // so `ruleCostLabel`'s ancestor branch never fires from here — the rule
-        // list and `confirmView`'s include arm are where a rule held from above
-        // is costed.
-        costLabel: entry.state.kind === 'excluded' ? ruleCostLabel(rules, entry.relativePath) : null,
         expandable: expandable && entry.isDir,
         excluded,
         expandAriaLabel: t('settings_folders_expand_named', { path: entry.relativePath }),
@@ -1673,11 +1591,6 @@
       cost:
         pending.kind === 'exclude'
           ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
-          // 🔴 Fix round 2, A1. Before `existsOnDisk`, not after it: the `_gone`
-          // arm promises that a folder appearing here later is indexed and sent
-          // to the provider, and while an ancestor rule stands that is false
-          // too. The fact that decides this question is that removing this rule
-          // releases nothing at all, and it holds whatever is on disk.
           // First: a push-down row is held from above by definition, and what
           // its tick does is take that rule away — the sentence below would
           // say the opposite.
@@ -1687,17 +1600,9 @@
           // the answer stores an include past it.
           : pending.gitignored
             ? t('settings_include_gitignored', { path })
-          : pending.heldAbove !== null
-            ? t('settings_subfolder_excluded_by_ancestor', { prefix: pending.heldAbove })
-          : pending.existsOnDisk
-            // The `_gone` arm is left unconditioned on `heldBelow` deliberately:
-            // it already says nothing is being indexed at this path today, and
-            // its clause about a folder appearing later over-states the exposure
-            // rather than under-stating it, which is the D29-safe direction.
-            ? pending.heldBelow
-              ? t('settings_folders_include_cost_held_below')
-              : t('settings_folders_include_cost')
-            : t('settings_folders_include_cost_gone'),
+          : pending.heldBelow
+            ? t('settings_folders_include_cost_held_below')
+            : t('settings_folders_include_cost'),
       confirmLabel: t('settings_folders_confirm'),
       confirmAriaLabel:
         pending.kind === 'exclude'
@@ -1766,22 +1671,6 @@
                     ? null
                     : t('settings_folders_question_withdrawn', { path: panel.withdrawn }),
                 confirm: panel.pending === null ? null : confirmView(panel.pending),
-                // 🔴 A rule is "the folder is gone" when and only when its own
-                // `existsOnDisk` says so. Comparing this list against the
-                // one-level listing above would mark every nested rule
-                // (`Work/private`) stale and invite a person to delete a rule
-                // that is still doing its job.
-                rules:
-                  panel.rules === null
-                    ? null
-                    : panel.rules.map((rule) => ({
-                        rule,
-                        goneLabel: rule.existsOnDisk ? null : t('settings_folders_rule_gone'),
-                        costLabel: ruleCostLabel(panel.rules, rule.prefix),
-                        removeAriaLabel: t('settings_folders_rule_remove_named', { prefix: rule.prefix }),
-                      })),
-                rulesHeading: t('settings_folders_rules_heading'),
-                rulesEmptyLabel: t('settings_folders_rules_none'),
               },
       };
     });
@@ -1802,7 +1691,6 @@
   };
   const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_folders_remove_selected'); });
   const treeHintLabel = $derived.by(() => { void $locale; return t('settings_folders_tree_hint'); });
-  const removeRuleLabel = $derived.by(() => { void $locale; return t('settings_folders_rule_remove'); });
   // 🔴 PR 8a, fix round 5. Words derived from the boolean `rootChanged` holds,
   // under `void $locale` like every other sentence on this screen.
   const rootChangedLabel = $derived.by(() => {
@@ -1870,11 +1758,9 @@
                 // A mixed box ticks everything inside (spec, rule 4).
                 if (row.control === 'exclude' && row.mixed) askAll(rootId, row.entry.relativePath);
                 else if (row.control === 'exclude') askExclude(rootId, row.entry.relativePath);
-                // `true`: this row is a directory entry `list_subfolders` read off
-                // the disk, so the folder is there. See `askInclude`.
                 else askInclude(
-                  rootId, row.entry.relativePath, true,
-                  row.entry.state.kind === 'excludedByAncestor', false,
+                  rootId, row.entry.relativePath,
+                  row.entry.state.kind === 'excludedByAncestor',
                   row.entry.state.kind === 'gitIgnored',
                 );
               }} />
@@ -1891,7 +1777,6 @@
                 data-testid={`subfolder-mark-${rootId}-${row.entry.relativePath}`}
                 title={row.mark.title ?? undefined}>{row.mark.text}</span>
             {/if}
-            {#if row.costLabel}<span class="tag">{row.costLabel}</span>{/if}
           </span>
         </div>
         {#if row.children}{@render subfolders(row.children, rootId)}{/if}
@@ -1984,31 +1869,6 @@
                   {/if}
                   {#if panel.loadingLabel}<p class="tnote">{panel.loadingLabel}</p>{/if}
                   {#if panel.level}{@render subfolders(panel.level, root.rootId)}{/if}
-                  {#if panel.rules}
-                    <div class="rules" data-testid={`folder-rules-${root.rootId}`}>
-                      {#if panel.rules.length === 0}
-                        <p class="tnote">{panel.rulesEmptyLabel}</p>
-                      {:else}
-                        <p class="tnote">{panel.rulesHeading}</p>
-                        <ul>
-                          <!-- `rule.existsOnDisk` goes to the question the same way
-                               `goneLabel` is drawn from it, so the two sentences in
-                               this panel cannot disagree about one folder. -->
-                          {#each panel.rules as { rule, goneLabel, costLabel, removeAriaLabel: ruleAria } (rule.prefix)}
-                            <li data-testid={`folder-rule-${root.rootId}-${rule.prefix}`}>
-                              <span>{rule.prefix}</span>
-                              {#if goneLabel}<span>{goneLabel}</span>{/if}
-                              <span>{costLabel}</span>
-                              <button
-                                type="button"
-                                aria-label={ruleAria}
-                                onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk, false, true)}>{removeRuleLabel}</button>
-                            </li>
-                          {/each}
-                        </ul>
-                      {/if}
-                    </div>
-                  {/if}
                 </div>
               {/if}
             </li>
@@ -2038,18 +1898,34 @@
               onclick={() => startIndexing(root)}>{startLabel}</button>
           </div>
         {/if}
+        <!-- A popup over the section, not a line in it (owner, 2026-11-12):
+             a question about a row deep in a long tree must not read as part
+             of the tree. Esc answers "Cancel". -->
         {#if removeConfirm}
-          <div data-testid={`folder-remove-confirm-${root.rootId}`}>
-            <p>{removeConfirm.question}</p>
-            <button
-              type="button"
-              aria-label={removeConfirm.confirmAriaLabel}
-              disabled={scanRunning}
-              onclick={confirmRemove}>{removeConfirm.confirmLabel}</button>
-            <button
-              type="button"
-              aria-label={removeConfirm.cancelAriaLabel}
-              onclick={cancelRemove}>{removeConfirm.cancelLabel}</button>
+          <div class="scrim">
+            <div
+              class="dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-label={removeConfirm.question}
+              tabindex="-1"
+              data-testid={`folder-remove-confirm-${root.rootId}`}
+              use:dialogFocus
+              onkeydown={(e) => { if (e.key === 'Escape') cancelRemove(); }}>
+              <p>{removeConfirm.question}</p>
+              <div class="dialog-actions">
+                <button
+                  type="button"
+                  aria-label={removeConfirm.confirmAriaLabel}
+                  disabled={scanRunning}
+                  onclick={confirmRemove}>{removeConfirm.confirmLabel}</button>
+                <button
+                  type="button"
+                  use:focusCancel
+                  aria-label={removeConfirm.cancelAriaLabel}
+                  onclick={cancelRemove}>{removeConfirm.cancelLabel}</button>
+              </div>
+            </div>
           </div>
         {/if}
         {#if panel}
@@ -2064,21 +1940,34 @@
                names the path, since it is not drawn inside the row it is about. -->
           {#if panel.confirm}
             {@const confirm = panel.confirm}
-            <div data-testid={`folder-confirm-${root.rootId}`}>
-              {#if confirm.kind === 'checking'}
-                <p>{confirm.checkingLabel}</p>
-              {:else}
-                <p>{confirm.heading}</p>
-                <p data-testid={`folder-confirm-cost-${root.rootId}`}>{confirm.cost}</p>
-                <button
-                  type="button"
-                  aria-label={confirm.confirmAriaLabel}
-                  onclick={() => answer(root.rootId)}>{confirm.confirmLabel}</button>
-                <button
-                  type="button"
-                  aria-label={confirm.cancelAriaLabel}
-                  onclick={() => dismiss(root.rootId)}>{confirm.cancelLabel}</button>
-              {/if}
+            <div class="scrim">
+              <div
+                class="dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label={confirm.kind === 'checking' ? confirm.checkingLabel : confirm.heading}
+                tabindex="-1"
+                data-testid={`folder-confirm-${root.rootId}`}
+                use:dialogFocus
+                onkeydown={(e) => { if (e.key === 'Escape') dismiss(root.rootId); }}>
+                {#if confirm.kind === 'checking'}
+                  <p>{confirm.checkingLabel}</p>
+                {:else}
+                  <p class="dialog-heading">{confirm.heading}</p>
+                  <p data-testid={`folder-confirm-cost-${root.rootId}`}>{confirm.cost}</p>
+                  <div class="dialog-actions">
+                    <button
+                      type="button"
+                      aria-label={confirm.confirmAriaLabel}
+                      onclick={() => answer(root.rootId)}>{confirm.confirmLabel}</button>
+                    <button
+                      type="button"
+                      use:focusCancel
+                      aria-label={confirm.cancelAriaLabel}
+                      onclick={() => dismiss(root.rootId)}>{confirm.cancelLabel}</button>
+                  </div>
+                {/if}
+              </div>
             </div>
           {/if}
         {/if}

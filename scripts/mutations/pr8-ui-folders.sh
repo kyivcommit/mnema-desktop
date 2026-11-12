@@ -116,7 +116,7 @@ case_ "the row's controls must be named, because undefined is not 'none'" \
   ui/src/settings/Folders.svelte \
   "s{\{#if row\.control === 'exclude' \|\| row\.control === 'include'\}}{\{#if row.control !== 'none'\}}" \
   "{#if row.control !== 'none'}" \
-  src/settings/Folders.test.ts 'a state this build has never heard of offers no control, and the rule stays reachable' runner=vitest
+  src/settings/Folders.test.ts 'a state this build has never heard of offers no control' runner=vitest
 
 # Task 5 review I2. Two obvious mutants of this guard are not results, which is
 # why the one used here is neither of them.
@@ -153,20 +153,6 @@ case_ "an excluded folder must still open, or nothing inside it can be looked at
   "s{      case 'excluded':\n        return \{ sentence: t\('settings_subfolder_excluded'\), control: 'include', expandable: true, excluded: true \};}{      case 'excluded':\n        return \{ sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true \};}" \
   "        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true };" \
   src/settings/Folders.test.ts 'an excluded folder opens, and what is inside it names the rule and offers an empty tick' runner=vitest
-
-# Task 7. These two labels are read inside a `$derived.by` whose only reference
-# to the language is the `void $locale` line, so dropping it freezes the label
-# at whatever language was current when the row was first drawn. Nothing else
-# notices: the sentence renders, the button works, and it is in the wrong
-# language only for somebody who switched. One anchor per case, because a single
-# case removing both would be killed by either.
-# The expand label's case is gone with the label: since the folders-tree PR 1
-# the chevron carries only an aria-label, built inside `rows`.
-case_ "the remove-rule label must read the locale, or it freezes at the first render" \
-  ui/src/settings/Folders.svelte \
-  "s{const removeRuleLabel = \\\$derived\.by\(\(\) => \{ void \\\$locale; return t\('settings_folders_rule_remove'\); \}\);}{const removeRuleLabel = \\\$derived.by(() => t('settings_folders_rule_remove'));}" \
-  "const removeRuleLabel = \$derived.by(() => t('settings_folders_rule_remove'));" \
-  src/settings/Folders.test.ts 'the expanded panel switches language with everything else on screen' runner=vitest
 
 # ── Task 8: what a finished scan re-reads ────────────────────────────────────
 #
@@ -386,13 +372,13 @@ case_ "an exclude question must still be asked when the id and the path agree" \
 # The mirror, and the half that removes protection rather than over-warning.
 case_ "a rule must not be removed on a folder the listing no longer puts at this id" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // Read from}{    /* mutant: no listing is consulted before the removal */\n    patch(rootId, \{\n      // Read from}" \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // From the capture}{    /* mutant: no listing is consulted before the removal */\n    patch(rootId, \{\n      // From the capture}" \
   "/* mutant: no listing is consulted before the removal */" \
   src/settings/Folders.test.ts 'a rule is not removed when the id now names another folder' runner=vitest
 
 case_ "a rule removal must still be asked about when the id and the path agree" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // Read from}{    if (true) \{ /* mutant: every removal refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    patch(rootId, \{\n      // Read from}" \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // From the capture}{    if (true) \{ /* mutant: every removal refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    patch(rootId, \{\n      // From the capture}" \
   "if (true) { /* mutant: every removal refused */" \
   src/settings/Folders.test.ts 'a rule removal is asked about and goes through when this folder' runner=vitest
 
@@ -423,6 +409,6 @@ case_ "a rejected re-read for a rule removal must not refuse silently" \
 
 case_ "a rejected re-read for a rule removal must not raise the question anyway" \
   ui/src/settings/Folders.svelte \
-  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: { kind: 'include', path, existsOnDisk, heldBelow: false, heldAbove: null } }); /* mutant: raises the removal question anyway */}" \
+  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: { kind: 'include', path, heldBelow: false, pushDown, gitignored } }); /* mutant: raises the removal question anyway */}" \
   "/* mutant: raises the removal question anyway */" \
   src/settings/Folders.test.ts 'a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it' runner=vitest
