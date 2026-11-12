@@ -375,7 +375,7 @@ fn a_gitignore_line_that_does_not_parse_marks_the_walk_incomplete() {
 }
 
 /// Under an include `.gitignore` does not apply at all, so a `.gitignore`
-/// there is not even read — and one that cannot be read costs nothing.
+/// there is not even read by the walk — and one that cannot be read costs nothing.
 #[cfg(unix)]
 #[test]
 fn a_gitignore_under_an_include_is_not_read() {

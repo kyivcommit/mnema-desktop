@@ -4,6 +4,7 @@ import Folders from './Folders.svelte';
 import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
 import { tick } from 'svelte';
+const tick_ = tick;
 import { get } from 'svelte/store';
 import { masksVersion } from './masksVersion';
 import type {
@@ -4387,6 +4388,31 @@ test('ticking a gitignored row asks before it stores an include', async () => {
 
   await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', 'on'));
 });
+
+// PR #102 review, Important: a tick that stores only an include changes no
+// exclusion rule, and the panel must not then say the rule was already gone.
+for (const [kind, tick, change] of [
+  ['gitIgnored', 'on', { added: [], removed: [], included: ['build'], unincluded: [] }],
+  ['gitIgnoredOpen', 'all', { added: [], removed: [], included: ['build'], unincluded: ['build/x/keep.txt'] }],
+] as const) {
+  test(`a ${tick} that only changes includes does not say the rule was already gone`, async () => {
+    await expand([sub('build', { kind, by: 'build' })]);
+    previewTick.mockResolvedValue(change);
+    setTick.mockReset();
+    setTick.mockResolvedValue(change);
+
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Index build' }));
+    await screen.findByTestId('folder-confirm-1');
+    await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+      name: t('settings_folders_confirm_include_named', { path: 'build' }),
+    }));
+
+    await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'build', tick));
+    await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(1));
+    await tick_();
+    expect(screen.queryByText(t('settings_folders_rule_already_gone'))).toBeNull();
+  });
+}
 
 test('an included row is ticked and tagged gitignore · included only on its own include', async () => {
   await expand([

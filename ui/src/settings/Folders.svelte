@@ -899,7 +899,12 @@
         patch(rootId, { alreadyGone: !(await includeSubfolder(rootId, path)) });
       } else {
         const change = await setTick(rootId, path, tick);
-        patch(rootId, { alreadyGone: change.added.length === 0 && change.removed.length === 0 });
+        // All four sets: a tick that only stores or drops an include changed
+        // something too (PR #102 review).
+        patch(rootId, {
+          alreadyGone: change.added.length === 0 && change.removed.length === 0
+            && change.included.length === 0 && change.unincluded.length === 0,
+        });
       }
     } catch (e) {
       patch(rootId, { actionError: message(e) });

@@ -88,7 +88,9 @@ impl GitignoreLayer {
     }
 
     /// What the walk asks: whether to prune this entry. An entry an include
-    /// covers is never pruned, and its `.gitignore` files are never read.
+    /// covers is never pruned, and the WALK never reads its `.gitignore` files.
+    /// [`GitignoreLayer::state`] still does (it names who holds the row before
+    /// asking about includes) — read and discarded, nothing the tree shows.
     pub(crate) fn prunes(&self, relative: &Path, is_dir: bool) -> bool {
         if self.covering_include(relative).is_some() {
             return false;
@@ -164,12 +166,8 @@ impl GitignoreLayer {
                 include: text(include),
             };
         }
-        if is_dir
-            && self
-                .includes
-                .iter()
-                .any(|i| i != relative && i.starts_with(relative))
-        {
+        // No include IS `relative` here: `covering_include` answered above.
+        if is_dir && self.includes.iter().any(|i| i.starts_with(relative)) {
             return GitState::IgnoredOpen { by: text(&by) };
         }
         GitState::Ignored { by: text(&by) }
