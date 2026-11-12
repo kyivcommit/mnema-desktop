@@ -121,8 +121,8 @@ export type HistoryOpen =
 // undescribed.
 //
 // What each one means for a person, since the words on screen come from it:
-//   - `open` — no rule this command can see. NOT a promise the folder is
-//     indexed; only that no rule excludes it.
+//   - `open` — no rule of the person's, no `.gitignore` and no built-in layer
+//     holds it (since PR 3 the listing asks the walk's own `.gitignore` layer).
 //   - `excluded` — a stored rule names this folder itself.
 //   - `excludedByAncestor` — a stored rule names an ancestor, and carries
 //     WHICH one: a row that says "held by a rule" without naming it leaves the

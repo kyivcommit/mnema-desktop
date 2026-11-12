@@ -762,10 +762,9 @@ impl WalkRules {
     /// **What it deliberately does NOT cover, and must never be read as
     /// covering:**
     ///
-    /// - **The in-tree `.gitignore` stack** (`git_ignore`/`git_exclude`, both
-    ///   gated on `gitignore`). Deciding it means compiling the same ignore
-    ///   stack the walk builds, per directory, from files inside the tree. A
-    ///   folder this answers `false` for may still be skipped by a
+    /// - **The in-tree `.gitignore` stack** — [`crate::GitignoreLayer`],
+    ///   gated on `gitignore`, answers it (the folders tree asks it beside
+    ///   this). A folder this answers `false` for may still be skipped by a
     ///   `.gitignore`; `false` means "no unconditional layer prunes it",
     ///   never "it will be indexed".
     /// - **The user's own exclusion rules.** Those are the caller's to report,

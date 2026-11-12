@@ -214,13 +214,15 @@ pub fn set_tick(
     let root_canonical = root_path
         .canonicalize()
         .map_err(|_| Error::RootUnavailable(root_id))?;
-    let (stored, mask_names, skips) = state.with_index(|db| {
+    let (stored, mask_names, skips, includes) = state.with_index(|db| {
         Ok::<_, mnema_index::Error>((
             db.list_path_exclusions(root_id)?,
             db.list_masks()?,
             crate::tree::whole_file_skips(db.skips_for_root(root_id)?),
+            db.list_gitignore_includes(root_id)?,
         ))
     })?;
+    let git = mnema_walk::GitignoreLayer::new(&root_canonical, &includes);
     let walk = WalkRules::none().with_masks(mask_names.clone())?;
     let layers = WalkRules::builtin_layers(&root_canonical);
     let mut level = |dir: &str, prefixes: &[String]| {
@@ -231,6 +233,7 @@ pub fn set_tick(
             walk.masks(),
             &mask_names,
             &skips,
+            &git,
         );
         let resolved = crate::tree::subfolder_dir(&root_canonical, root_id, dir)?;
         crate::tree::read_level(&resolved, root_id, dir, &rules)

@@ -452,7 +452,8 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
                 continue;
             }
             let prefixes = db.list_path_exclusions(root.id)?;
-            rows.push((root.id, root.absolute_path, prefixes));
+            let includes = db.list_gitignore_includes(root.id)?;
+            rows.push((root.id, root.absolute_path, prefixes, includes));
         }
         Ok((rows, masks))
     })?;
@@ -468,14 +469,16 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
     test_hook(state);
 
     let mut prepared = Vec::with_capacity(rows.len());
-    for (id, path, prefixes) in rows {
+    for (id, path, prefixes, includes) in rows {
         // The same fixed defaults and the same refusal the deleted
         // `start_walk_job` used, and the refusal is the point: under D29 an
         // indexed file is a file
         // whose text is sent to a third-party provider, so a rule that will not
         // apply stops the scan rather than being silently absent. `with_masks`
         // REPLACES the mask set, so the whole stored set goes in one call.
-        let rules = WalkRules::new(true, true, prefixes)?.with_masks(masks.clone())?;
+        let rules = WalkRules::new(true, true, prefixes)?
+            .with_masks(masks.clone())?
+            .with_includes(includes)?;
         prepared.push(PreparedRoot {
             id,
             path: PathBuf::from(path),

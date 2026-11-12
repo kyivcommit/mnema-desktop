@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
 use mnema_index::{Db, DocumentStatus, PathOccupant};
-use mnema_walk::{BuiltinLayers, MaskLayer, WalkRules};
+use mnema_walk::{BuiltinLayers, GitState, GitignoreLayer, MaskLayer, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -102,11 +102,21 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
                 .with_masks(mask_names.clone())
                 .unwrap_or_else(|_| WalkRules::none());
             let prefixes = db.list_path_exclusions(r.id)?;
+            let git = GitignoreLayer::new(
+                Path::new(&r.absolute_path),
+                &db.list_gitignore_includes(r.id)?,
+            );
             let skips = whole_file_skips(db.skips_for_root(r.id)?);
             let failed = skips
                 .iter()
                 .filter(|skip| {
-                    counted_failure(Path::new(&r.absolute_path), skip, &prefixes, walk.masks())
+                    counted_failure(
+                        Path::new(&r.absolute_path),
+                        skip,
+                        &prefixes,
+                        walk.masks(),
+                        &git,
+                    )
                 })
                 .count() as u64;
             Ok(TreeRoot {
@@ -1090,7 +1100,7 @@ pub struct ScanFailure {
 /// | 2 | `ANCHORED_DIRS` names the folder **or an ancestor** *and* a marker file sits in that one's own parent — the one built-in layer that is not an override | the same call | `BuiltIn` |
 /// | 3 | `follow_links(false)` — the folder is a symlink | `Entry::is_symlink` | `Symlink` |
 /// | 4 | `validate_prefix` refuses the path as a rule — whitespace at a component's edge, a backslash, a control character, `C:` or `~` as the first component, or a prefix too large to compile alone | `WalkRules::check_prefix` | `UnusableName` |
-/// | 5 | the in-tree `.gitignore` stack | **nothing — see below** | `Open` |
+/// | 5 | the in-tree `.gitignore` stack, and the person's includes over it | `GitignoreLayer::state` — the walk's own layer | `GitIgnored`, `GitIgnoredOpen`, `GitIncluded` |
 ///
 /// Rows 1, 2 and 4 are asked through **one call each into `mnema-walk`**,
 /// never re-implemented here: the whitelist in row 4 grew across three review
@@ -1119,13 +1129,13 @@ pub struct ScanFailure {
 /// Row 4 was already cross-checked that way — `exclude_subfolder` runs the
 /// same validator — which is why it was the one row where the two agreed.
 ///
-/// ⚠️ **Row 5 is deliberately not closable here, and no claim above covers
-/// it.** Deciding the in-tree `.gitignore` stack means compiling the same
-/// ignore stack the walk builds, per directory, out of files inside the tree —
-/// which this read-only listing does not do. **So `Open` does not mean "will
-/// be indexed"**: it means *no layer this command can see* holds the folder. A
-/// window's wording here must be about the rules this screen can see, never
-/// about what the walk will do.
+/// **Row 5 is asked of the walk's own matcher** since the folders tree PR 3
+/// (D202): `mnema-walk` decides `.gitignore` itself (`gitignore.rs`) and this
+/// listing builds the same `GitignoreLayer` from the same stored includes, so a
+/// row cannot say "indexed" about what `.gitignore` keeps out, or the reverse.
+/// Until PR 3 this row read "nothing", and `Open` said only that no layer this
+/// command could see held the folder. `Open` still promises nothing about a
+/// file the walk cannot read — that is the scan's verdict, shown as `⚠`.
 ///
 /// **Precedence, in the order [`subfolder_state`] applies it.** The first two
 /// are walk layers no rule can lift; the next two report a rule that exists
@@ -1155,7 +1165,10 @@ pub struct ScanFailure {
 ///    from the person — `list_exclusions` lists every stored prefix.
 /// 4. `Excluded` — a stored rule names this folder itself, and nothing above
 ///    it. The one state whose control does what it says.
-/// 5. `UnusableName` — row 4. Below the two rule states deliberately: a rule
+/// 5. `GitIgnored` / `GitIgnoredOpen` / `GitIncluded` — row 5, after the
+///    person's own rules because those prune first in the walk too: a folder
+///    both excluded and named by `.gitignore` shows the rule a tick removes.
+/// 6. `UnusableName` — row 4. Below the two rule states deliberately: a rule
 ///    that already exists is a fact worth reporting, and its removal works.
 ///    (Reaching both at once takes a rule this build's `exclude_subfolder`
 ///    would not write, since it runs the same validator — but that is not the
@@ -1163,7 +1176,7 @@ pub struct ScanFailure {
 ///    was narrower** reaches it, which is the path `Error::InvalidRule`
 ///    already names for the walk, and a row written straight into the database
 ///    reaches it too.)
-/// 6. `Open` — none of the above.
+/// 7. `Open` — none of the above.
 ///
 /// **Since the folders tree PR 2 files are listed too**, and two states slot in
 /// after `Symlink`: `NotRead` (a whole-file skip under `unsupported` or
@@ -1184,8 +1197,8 @@ pub struct ScanFailure {
     tag = "kind"
 )]
 pub enum SubfolderState {
-    /// No rule this command can see. **Not** a promise that the folder will
-    /// be indexed — see this type's own doc comment.
+    /// No rule of the person's, no `.gitignore` and no built-in layer holds
+    /// it: the walk takes it (whether it can READ it is the scan's `⚠`).
     Open,
     /// A stored prefix names this folder itself, and no ancestor of it.
     Excluded,
@@ -1237,6 +1250,16 @@ pub enum SubfolderState {
     /// `unsupported` or `not_text`. Not drawn: the spec hides formats Mnema
     /// cannot read rather than marking every photo as a failure.
     NotRead,
+    /// D202 PR 3: the in-tree `.gitignore` holds the row — `by` is the topmost
+    /// path on its chain a `.gitignore` names (the row itself or a folder
+    /// above it) — and no include lifts it. The walk does not index it.
+    GitIgnored { by: String },
+    /// Held as `GitIgnored`, but an include lies strictly below this folder:
+    /// the walk goes in and keeps only the included paths.
+    GitIgnoredOpen { by: String },
+    /// `.gitignore` would hold the row, and the person's include `include`
+    /// (the row itself or a folder above it) lifts it: the walk indexes it.
+    GitIncluded { include: String },
 }
 
 /// Whether `prefix` is a **strict ancestor** of `path`.
@@ -1296,6 +1319,14 @@ fn subfolder_state(rules: &LevelRules<'_>, relative_path: &str, entry: &Entry) -
     // drive-letter and `~` rules to the FIRST component only, so `a/~` is a
     // rule `exclude_subfolder` accepts and `~` at the top level is not. Asking
     // about the name alone would refuse the first of those.
+    // After the person's own rules, which prune first in the walk too: an
+    // exclusion on a folder `.gitignore` also names is the rule to show.
+    match rules.git.state(relative_path, entry.is_dir) {
+        GitState::Clear => {}
+        GitState::Ignored { by } => return SubfolderState::GitIgnored { by },
+        GitState::IgnoredOpen { by } => return SubfolderState::GitIgnoredOpen { by },
+        GitState::Included { include } => return SubfolderState::GitIncluded { include },
+    }
     if WalkRules::check_prefix(relative_path).is_err() {
         return SubfolderState::UnusableName;
     }
@@ -1317,6 +1348,7 @@ pub(crate) struct LevelRules<'a> {
     mask_names: &'a [String],
     /// Whole-file rows only — see [`whole_file_skips`].
     skips: &'a [mnema_index::SkippedFile],
+    git: &'a GitignoreLayer,
 }
 
 impl<'a> LevelRules<'a> {
@@ -1327,6 +1359,7 @@ impl<'a> LevelRules<'a> {
         masks: &'a MaskLayer,
         mask_names: &'a [String],
         skips: &'a [mnema_index::SkippedFile],
+        git: &'a GitignoreLayer,
     ) -> Self {
         Self {
             root,
@@ -1335,6 +1368,7 @@ impl<'a> LevelRules<'a> {
             masks,
             mask_names,
             skips,
+            git,
         }
     }
 
@@ -1381,17 +1415,28 @@ fn counted_failure(
     skip: &mnema_index::SkippedFile,
     prefixes: &[String],
     masks: &MaskLayer,
+    git: &GitignoreLayer,
 ) -> bool {
-    shown_failure(skip, prefixes, masks)
+    shown_failure(skip, prefixes, masks, git)
         && std::fs::symlink_metadata(root.join(&skip.relative_path)).is_ok_and(|m| m.is_file())
 }
 
-fn shown_failure(skip: &mnema_index::SkippedFile, prefixes: &[String], masks: &MaskLayer) -> bool {
+fn shown_failure(
+    skip: &mnema_index::SkippedFile,
+    prefixes: &[String],
+    masks: &MaskLayer,
+    git: &GitignoreLayer,
+) -> bool {
     !hides_the_file(&skip.rule)
         && !prefixes
             .iter()
             .any(|p| p == &skip.relative_path || is_ancestor_of(p, &skip.relative_path))
         && !masks.matches(&skip.relative_path)
+        // A file `.gitignore` holds is not read by the scan (plan ruling 11).
+        && !matches!(
+            git.state(&skip.relative_path, false),
+            GitState::Ignored { .. } | GitState::IgnoredOpen { .. }
+        )
 }
 
 /// One filesystem error about a **path**, split by
@@ -1591,7 +1636,7 @@ pub(crate) fn read_subfolders(
         // records nothing for a built-in or symlinked entry.
         let failure = rules
             .skip_at(&relative_path)
-            .filter(|skip| shown_failure(skip, rules.prefixes, rules.masks))
+            .filter(|skip| shown_failure(skip, rules.prefixes, rules.masks, rules.git))
             .map(|skip| ScanFailure {
                 rule: skip.rule.clone(),
                 reason: skip.reason.clone(),
@@ -1602,7 +1647,7 @@ pub(crate) fn read_subfolders(
                 .iter()
                 .filter(|skip| {
                     is_ancestor_of(&relative_path, &skip.relative_path)
-                        && counted_failure(rules.root, skip, rules.prefixes, rules.masks)
+                        && counted_failure(rules.root, skip, rules.prefixes, rules.masks, rules.git)
                 })
                 .count() as u64
         } else {
@@ -1675,11 +1720,12 @@ pub fn list_subfolders(
     // give, because every `relativePath` this call would emit has this path as
     // its ancestor and would inherit the refusal.
     WalkRules::check_prefix(&relative_path)?;
-    let (prefixes, mask_names, skips) = state.with_index(|db| {
+    let (prefixes, mask_names, skips, includes) = state.with_index(|db| {
         Ok::<_, mnema_index::Error>((
             db.list_path_exclusions(root_id)?,
             db.list_masks()?,
             whole_file_skips(db.skips_for_root(root_id)?),
+            db.list_gitignore_includes(root_id)?,
         ))
     })?;
     // A stored mask that does not compile refuses the listing (the plan's
@@ -1691,6 +1737,9 @@ pub fn list_subfolders(
     // Compiled once for the whole listing, not once a row: it holds a globset,
     // and `subfolder_state` asks it for every entry.
     let layers = WalkRules::builtin_layers(&root_canonical);
+    // The walk's own `.gitignore` layer (`mnema-walk/src/gitignore.rs`), so a
+    // row says what the scan will do with it.
+    let git = GitignoreLayer::new(&root_canonical, &includes);
     let rules = LevelRules::new(
         &root_canonical,
         &layers,
@@ -1698,6 +1747,7 @@ pub fn list_subfolders(
         walk.masks(),
         &mask_names,
         &skips,
+        &git,
     );
     read_level(&dir, root_id, &relative_path, &rules)
 }
@@ -1964,6 +2014,7 @@ mod tests {
         let walk = WalkRules::none().with_masks(mask_names.clone()).unwrap();
         // Through `whole_file_skips`, as `list_subfolders` reads them.
         let skips = whole_file_skips(skips.to_vec());
+        let git = GitignoreLayer::new(root.path(), &[]);
         let rules = LevelRules::new(
             root.path(),
             &layers,
@@ -1971,6 +2022,7 @@ mod tests {
             walk.masks(),
             &mask_names,
             &skips,
+            &git,
         );
         read_subfolders(&rules, entries, parent)
     }
@@ -2164,7 +2216,8 @@ mod tests {
         std::fs::write(root.path().join("Cargo.toml"), b"x").unwrap();
         let layers = WalkRules::builtin_layers(root.path());
         let walk = WalkRules::none();
-        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &[]);
+        let git = GitignoreLayer::new(root.path(), &[]);
+        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &[], &git);
         let entries = vec![
             entry(b"target", false, false),
             entry(b"Cargo.toml", false, false),
@@ -2198,7 +2251,8 @@ mod tests {
         ];
         let layers = WalkRules::builtin_layers(root.path());
         let walk = WalkRules::none();
-        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &skips);
+        let git = GitignoreLayer::new(root.path(), &[]);
+        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &skips, &git);
         let listing = read_subfolders(&rules, &[entry(b"a", true, false)], "");
         assert_eq!(listing.entries[0].failed_below, 1, "{listing:?}");
     }
