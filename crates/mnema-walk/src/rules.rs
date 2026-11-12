@@ -1,6 +1,8 @@
+use crate::gitignore::GitignoreLayer;
 use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// The rule layers, in the order they are applied. All of them are live at
@@ -37,6 +39,11 @@ pub struct WalkRules {
     /// failure modes it does and does not share with the `Override` the two
     /// fields above feed.
     masks: MaskLayer,
+    /// Paths a person ticked past `.gitignore` (D202, PR 3), validated exactly
+    /// as `user_prefixes` are. They lift only the `.gitignore` layer: a user
+    /// prefix still prunes first, through the `Override`, so an exclusion on a
+    /// folder above an include wins.
+    includes: Vec<String>,
 }
 
 /// A user-supplied exclusion prefix that cannot become a rule at all — not
@@ -567,6 +574,7 @@ impl WalkRules {
             // Masks are the builder step's, never `new`'s — see
             // `with_masks` for why `new` keeps its signature.
             masks: MaskLayer::default(),
+            includes: Vec::new(),
         })
     }
 
@@ -606,6 +614,29 @@ impl WalkRules {
     /// than a second one, and [`WalkRules::with_masks`] for how to build a
     /// throwaway `WalkRules` around one candidate mask, which is also what
     /// validates it.
+    /// The includes past `.gitignore`, whole — a builder step like
+    /// [`WalkRules::with_masks`], and it replaces the set the same way. Each
+    /// goes through `validate_prefix`: an include is a path a person chose on
+    /// disk, the same kind of thing a prefix is.
+    pub fn with_includes(mut self, includes: Vec<String>) -> Result<Self, RulesError> {
+        let mut normalized = Vec::with_capacity(includes.len());
+        for include in &includes {
+            if let Some(clean) = validate_prefix(include)? {
+                normalized.push(clean);
+            }
+        }
+        self.includes = normalized;
+        Ok(self)
+    }
+
+    /// The `.gitignore` layer this rule set applies under `root`, or `None`
+    /// when `.gitignore` is off. The walk builds one per walk; a listing builds
+    /// one per call, so both read the same matcher (`gitignore.rs`).
+    pub fn gitignore_layer(&self, root: &Path) -> Option<GitignoreLayer> {
+        self.gitignore
+            .then(|| GitignoreLayer::new(root, &self.includes))
+    }
+
     pub fn masks(&self) -> &MaskLayer {
         &self.masks
     }
@@ -793,7 +824,7 @@ impl WalkRules {
     /// the second value cannot tell "excluded nothing because there was
     /// nothing to exclude" from "excluded nothing because the pattern
     /// engine silently gave up." See `Walked::rules_applied`.
-    pub(crate) fn builder(&self, root: &Path) -> (WalkBuilder, bool) {
+    pub(crate) fn builder(&self, root: &Path) -> (WalkBuilder, bool, Option<Arc<GitignoreLayer>>) {
         let mut b = WalkBuilder::new(root);
         // A symlink cycle is an endless walk, and the same bytes under two
         // names are one document anyway (§5).
@@ -803,11 +834,16 @@ impl WalkRules {
             // built-in list names the dot-directories that are not.
             .hidden(false)
             .git_global(false)
-            .git_exclude(self.gitignore)
-            .git_ignore(self.gitignore)
-            // Load-bearing, and the reason `tests/rules.rs` exists: the
-            // default is TRUE, under which no ignore rule applies outside a
-            // git repository — silently.
+            // 🔴 Off, and `.gitignore` is NOT off: this crate's own layer
+            // decides it in `filter_entry` below (`gitignore.rs`), so the
+            // folders tree can ask the same matcher and an include can lift
+            // it (D202, PR 3). Turning these back on would apply `.gitignore`
+            // twice and make every include silently do nothing.
+            .git_exclude(false)
+            .git_ignore(false)
+            // Kept although nothing above reads ignore files any more: the
+            // walker's own default must not start applying anything if a
+            // later edit turns one of them on.
             .require_git(false)
             // `ignore` and `parents` both default to true, and `parents`
             // means "climb above the root looking for more `.ignore` files
@@ -827,11 +863,24 @@ impl WalkRules {
         // predicates" (`walk.rs:1042-1044`) — a second call for the masks
         // would silently un-anchor `target`/`build`/`dist`.
         let masks = self.masks.clone();
+        let git = self.gitignore_layer(root).map(Arc::new);
+        let git_in_filter = git.clone();
+        let walk_root = root.to_path_buf();
         b.filter_entry(move |entry| {
             // The root itself is never a candidate — pruning it would empty
             // the whole walk, not remove one directory from it.
             if entry.depth() == 0 {
                 return true;
+            }
+            // The `.gitignore` layer FIRST, and on the path rather than the
+            // name: the anchored arm below returns early, and a name that is
+            // not UTF-8 bails out of the rest — the walker applied
+            // `.gitignore` to both before this layer existed.
+            if let Some(git) = &git_in_filter
+                && let Ok(relative) = entry.path().strip_prefix(&walk_root)
+                && git.prunes(relative, entry.file_type().is_some_and(|t| t.is_dir()))
+            {
+                return false;
             }
             let Some(name) = entry.file_name().to_str() else {
                 return true;
@@ -880,13 +929,13 @@ impl WalkRules {
         match self.compiled_override(root) {
             Ok(built) => {
                 b.overrides(built);
-                (b, true)
+                (b, true, git)
             }
             // Every override-based layer silently stops applying — the
             // built-in list included, since it shares this one `Override`
             // with the user prefixes. `filter_entry`'s anchored layer is
             // unaffected: it does not go through the pattern engine.
-            Err(_) => (b, false),
+            Err(_) => (b, false, git),
         }
     }
 

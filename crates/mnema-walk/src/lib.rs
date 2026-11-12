@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod cloud;
+mod gitignore;
 mod rules;
 // `RulesError` has to be nameable outside this crate: `WalkRules::new`
 // returns it, and a caller with a save dialog in front of a person needs to
 // match on it or put it in a signature, not just observe that `new` failed
 // (review fix round 2, Critical finding — this line was the whole gap).
+pub use gitignore::{GitState, GitignoreLayer};
 pub use rules::{AppliedRules, BuiltinLayers, MaskLayer, RulesError, WalkRules};
 
 // Defined in the shared-types crate, re-exported here so a caller that only
@@ -174,7 +176,7 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
         return walked;
     }
 
-    let (builder, rules_applied) = rules.builder(root);
+    let (builder, rules_applied, git) = rules.builder(root);
     walked.rules_applied = rules_applied;
     let walk = builder.build();
 
@@ -305,6 +307,25 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     // builder-level sort is kept for locality; this sort is what actually
     // makes the order the same on two machines.
     walked.found.sort_by(|a, b| a.relative.cmp(&b.relative));
+    // An ignore file the `.gitignore` layer could not read is what the walker
+    // used to yield as its own `Err` — the same record, so a scan that missed
+    // a `.gitignore` still refuses to delete on its absences.
+    if let Some(git) = git {
+        for err in git.take_errors() {
+            for err in flatten_partial(&err) {
+                walked.unreadable += 1;
+                walked.complete = false;
+                let path = error_path(err);
+                walked.skipped.push(PreSkip {
+                    relative: path.and_then(|p| relative_of(root, p)),
+                    detail: path
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| err.to_string()),
+                    rule: PreSkipRule::Unreadable,
+                });
+            }
+        }
+    }
     walked
 }
 
