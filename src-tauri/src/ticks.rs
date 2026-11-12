@@ -278,7 +278,15 @@ pub(crate) fn plan_tick(
             }
             change.remove(stored, path);
         }
-        (Tick::All, SubfolderState::Open | SubfolderState::GitIgnoredOpen { .. }) => {
+        // `GitIncluded` too: an included folder with a rule inside is mixed
+        // in the window, and its click must do what it asks (final review,
+        // Important 2).
+        (
+            Tick::All,
+            SubfolderState::Open
+            | SubfolderState::GitIgnoredOpen { .. }
+            | SubfolderState::GitIncluded { .. },
+        ) => {
             for prefix in stored.exclusions.iter().filter(|p| under(p, path)) {
                 change.remove(stored, prefix);
             }
@@ -936,6 +944,21 @@ mod tests {
             assert_eq!(
                 plan(&root, &[], &["build/x/keep.txt"], "build", Tick::All).unwrap(),
                 change(&[], &[], &["build"], &["build/x/keep.txt"])
+            );
+        }
+
+        /// Final review, Important 2: an included folder with an exclusion
+        /// inside shows `–`; its click must take that exclusion away.
+        #[test]
+        fn all_on_an_included_folder_removes_the_exclusions_inside() {
+            let root = disk(&[
+                (".gitignore", "vendor/\n"),
+                ("vendor/a.txt", "x"),
+                ("vendor/b.txt", "x"),
+            ]);
+            assert_eq!(
+                plan(&root, &["vendor/a.txt"], &["vendor"], "vendor", Tick::All).unwrap(),
+                change(&[], &["vendor/a.txt"], &[], &[])
             );
         }
 

@@ -24,9 +24,10 @@
 //!   match outranks any `exclude` match (`matched_ignore`, `:548-684`);
 //! - a held folder holds everything under it: the walker never descends, so a
 //!   `!` line deeper down cannot bring a file back — git behaves the same;
-//! - a line that does not parse costs that line, the rest still apply; an
-//!   ignore file that cannot be read is an error (`create_gitignore`,
-//!   `:1016-1051`), reported through [`GitignoreLayer::take_errors`].
+//! - a line that does not parse costs that line, the rest still apply, and
+//!   is an error reported through [`GitignoreLayer::take_errors`]; an ignore
+//!   file that cannot be READ is passed over silently (`create_gitignore`,
+//!   `:1016-1051`, and `push_ignore_io` in `lib.rs`).
 //!
 //! `tests/gitignore.rs` holds the layer to `ignore` itself on fixtures and on
 //! random trees.
@@ -246,11 +247,16 @@ impl GitignoreLayer {
     }
 
     /// `create_gitignore`'s steps for one file: add it only when it exists,
-    /// keep what parsed, record every error.
+    /// keep what parsed, record every error — except an I/O one. `ignore`
+    /// drops those (`maybe_push_ignore_io`, `lib.rs:380-384`), so a
+    /// `.gitignore` that cannot be read was passed over and the walk stayed
+    /// complete; recording it would stop every deletion under the root for as
+    /// long as the file stays unreadable (final review, Important 1).
     fn compile(&self, dir: &Path, file: &Path) -> Gitignore {
         let mut builder = GitignoreBuilder::new(dir);
         if file.exists()
             && let Some(err) = builder.add(file)
+            && !err.is_io()
         {
             self.errors.lock().unwrap().push(err);
         }

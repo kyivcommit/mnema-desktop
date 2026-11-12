@@ -4400,24 +4400,31 @@ test('an included row is ticked and tagged gitignore · included only on its own
   expect(within(screen.getByTestId('subfolder-1-b.log')).queryByText(t('settings_entry_gitignore_included'))).toBeNull();
 });
 
-test('a folder whose loaded child is gitignored shows the mixed tick', async () => {
+// Final review, Important 3: a `.gitignore` row inside does NOT make its
+// folder `–`. Otherwise an expanded folder's click asks to index everything
+// `.gitignore` names (`.env` included) instead of excluding the folder, and the
+// same click did different things collapsed and expanded.
+test('a folder whose loaded child is gitignored stays ticked and its click excludes it', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listSubfolders.mockImplementation((_rootId: number, path: string) =>
     Promise.resolve(path === ''
       ? subfolders([sub('a')])
-      : subfolders([fileRow('x.log', { kind: 'gitIgnored', by: 'a/x.log' }, 'a'), fileRow('y.txt', { kind: 'open' }, 'a')])));
+      : subfolders([fileRow('.env', { kind: 'gitIgnored', by: 'a/.env' }, 'a'), fileRow('y.txt', { kind: 'open' }, 'a')])));
   listExclusions.mockResolvedValue([]);
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  const check = await screen.findByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
-  // Collapsed: nothing loaded says so (plan ruling 10).
-  expect(check.indeterminate).toBe(false);
-
+  await screen.findByRole('checkbox', { name: 'Index a' });
   await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
-  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/x.log')).toBeTruthy());
-  expect((screen.getByRole('checkbox', { name: 'Index a' }) as HTMLInputElement).indeterminate).toBe(true);
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/.env')).toBeTruthy());
+
+  const check = screen.getByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
+  expect(check.indeterminate).toBe(false);
+  expect(check.checked).toBe(true);
+  await fireEvent.click(check);
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'a'));
+  expect(previewTick).not.toHaveBeenCalled();
 });
 
 test('the mixed box names the rules that go and the rows that start being indexed', async () => {

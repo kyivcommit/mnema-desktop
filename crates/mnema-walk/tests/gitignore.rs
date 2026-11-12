@@ -323,20 +323,45 @@ fn an_exclusion_above_an_include_wins() {
     );
 }
 
+/// Final review, Important 1. `ignore` passes over an ignore file it cannot
+/// READ — `push_ignore_io` drops every `is_io()` error (`lib.rs:380-384`) and
+/// `add_child` says so (`dir.rs:267`) — so before this layer such a root still
+/// walked complete and deletions applied. Marking it incomplete would stop
+/// every deletion under the root for as long as the file stays unreadable.
 #[cfg(unix)]
 #[test]
-fn an_unreadable_gitignore_marks_the_walk_incomplete() {
+fn an_unreadable_gitignore_is_passed_over_as_ignore_did() {
     use std::os::unix::fs::PermissionsExt;
-    let root = tree(&[("sub/.gitignore", "secret.txt\n"), ("sub/secret.txt", "x")]);
+    let root = tree(&[
+        ("sub/.gitignore", "secret.txt\n"),
+        ("sub/secret.txt", "x"),
+        ("dir/.gitignore/inside.txt", "x"),
+        ("dir/kept.txt", "x"),
+    ]);
     let gi = root.path().join("sub/.gitignore");
     fs::set_permissions(&gi, fs::Permissions::from_mode(0o000)).unwrap();
+    let want = oracle(root.path());
     let walked = enumerate(root.path(), &gitignore_only());
     fs::set_permissions(&gi, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(walked.complete, "{:?}", walked.skipped);
+    let got: BTreeSet<String> = walked.found.into_iter().map(|f| f.relative).collect();
+    assert_eq!(got, want);
+}
+
+/// The other half: a line `ignore` cannot parse IS an error it reports, the
+/// walk is incomplete, and the lines that did parse still apply.
+#[test]
+fn a_gitignore_line_that_does_not_parse_marks_the_walk_incomplete() {
+    let root = tree(&[
+        (".gitignore", "secret.txt\n[z-a]\n"),
+        ("secret.txt", "x"),
+        ("kept.txt", "x"),
+    ]);
+    let walked = enumerate(root.path(), &gitignore_only());
     assert!(
         !walked.complete,
-        "an unread `.gitignore` left the walk complete"
+        "a broken `.gitignore` line left the walk complete"
     );
-    assert!(walked.unreadable >= 1);
     assert!(
         walked
             .skipped
@@ -345,6 +370,8 @@ fn an_unreadable_gitignore_marks_the_walk_incomplete() {
         "no skip names the `.gitignore`: {:?}",
         walked.skipped
     );
+    let got: BTreeSet<String> = walked.found.into_iter().map(|f| f.relative).collect();
+    assert_eq!(got, oracle(root.path()));
 }
 
 /// Under an include `.gitignore` does not apply at all, so a `.gitignore`
