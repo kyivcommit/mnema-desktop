@@ -633,7 +633,7 @@
   // the sentence states.
   //
   async function askInclude(
-    rootId: number, path: string, pushDown = false, gitignored = false,
+    rootId: number, path: string, pushDown = false, gitignored = false, isDir = true,
   ) {
     // Captured before the await for `askExclude`'s reason, and `rules` is read
     // from that same capture on purpose: the question states what was true when
@@ -663,6 +663,14 @@
     if (asks[rootId] !== generation) return;
     if (!namesFolder(listing, rootId, panel.rootPath)) {
       abandonChangedFolder(rootId);
+      return;
+    }
+    // Owner, 2026-11-12: a file the person unticked names exactly what comes
+    // back, so no question. Not a push-down (it changes the folders above) and
+    // not a `.gitignore` row (the person never chose to leave it out).
+    if (!isDir && !pushDown && !gitignored) {
+      patch(rootId, { pending: null });
+      await include(rootId, path, 'on');
       return;
     }
     patch(rootId, {
@@ -1757,6 +1765,7 @@
                   rootId, row.entry.relativePath,
                   row.entry.state.kind === 'excludedByAncestor',
                   row.entry.state.kind === 'gitIgnored',
+                  row.entry.isDir,
                 );
               }} />
           {:else}

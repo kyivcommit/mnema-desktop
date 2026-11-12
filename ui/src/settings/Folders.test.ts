@@ -4088,3 +4088,36 @@ test('a stored mask offers Apply changes too, in the language on screen', async 
 
   expect((await screen.findByTestId('folders-apply')).textContent).toBe('Застосувати зміни');
 });
+
+// Owner, 2026-11-12: ticking back a file the person unticked names exactly one
+// file they chose — no question. A folder still asks (it brings in what it
+// holds), and so does a file `.gitignore` names (the person never chose to
+// leave it out, and such files are often secrets).
+test('re-ticking a file the person excluded stores it at once, with no question', async () => {
+  await expand([fileRow('b.pdf', { kind: 'excluded' })], [{ prefix: 'b.pdf', existsOnDisk: true }]);
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: [], removed: ['b.pdf'], included: [], unincluded: [] });
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
+
+  await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'on'));
+  expect(setTick).toHaveBeenCalledTimes(1);
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+});
+
+test('re-ticking an excluded folder or a gitignored file still asks', async () => {
+  await expand([
+    sub('Archive', { kind: 'excluded' }),
+    fileRow('.env', { kind: 'gitIgnored', by: '.env' }),
+  ], [{ prefix: 'Archive', existsOnDisk: true }]);
+  setTick.mockReset();
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Archive' }));
+  await screen.findByRole('dialog', { name: 'Stop excluding Archive?' });
+  await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index .env' }));
+  await screen.findByTestId('folder-confirm-1');
+  expect(setTick).not.toHaveBeenCalled();
+});

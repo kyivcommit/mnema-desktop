@@ -372,13 +372,13 @@ case_ "an exclude question must still be asked when the id and the path agree" \
 # The mirror, and the half that removes protection rather than over-warning.
 case_ "a rule must not be removed on a folder the listing no longer puts at this id" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // From the capture}{    /* mutant: no listing is consulted before the removal */\n    patch(rootId, \{\n      // From the capture}" \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    // Owner, 2026-11-12: a file the person}{    /* mutant: no listing is consulted before the removal */\n    // Owner, 2026-11-12: a file the person}" \
   "/* mutant: no listing is consulted before the removal */" \
   src/settings/Folders.test.ts 'a rule is not removed when the id now names another folder' runner=vitest
 
 case_ "a rule removal must still be asked about when the id and the path agree" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // From the capture}{    if (true) \{ /* mutant: every removal refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    patch(rootId, \{\n      // From the capture}" \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    // Owner, 2026-11-12: a file the person}{    if (true) \{ /* mutant: every removal refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    // Owner, 2026-11-12: a file the person}" \
   "if (true) { /* mutant: every removal refused */" \
   src/settings/Folders.test.ts 'a rule removal is asked about and goes through when this folder' runner=vitest
 
