@@ -91,7 +91,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_hint' | 'settings_masks_remove_selected'
-  | 'settings_masks_remove' | 'settings_masks_remove_named'
+  | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
   | 'settings_masks_confirm_add_heading' | 'settings_masks_confirm_remove_heading'
   | 'settings_masks_add_cost' | 'settings_masks_remove_cost'
@@ -597,8 +597,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     //
     // 🔴 Раунд виправлень 2, A2: «окрім того, що виключають ваші інші правила»
     // — це ОБІЦЯНКА винятку, і правило, чиєї теки на диску немає, її не
-    // забезпечує: при наступному скануванні воно не виключає нічого, а та сама
-    // панель двома рядками нижче пише про нього `settings_folders_rule_gone`.
+    // забезпечує: при наступному скануванні воно не виключає нічого.
     // Тому `heldBelow` читає `existsOnDisk` кожного правила: такий виняток
     // применшив би те, що йде провайдеру, а це єдиний напрям, якого D29 не
     // дозволяє.
@@ -662,11 +661,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_gitignored_heading: 'Індексувати {path}?',
     settings_folders_include_cost_held_below: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
     // 🔴 Рев'ю раунду 1 (I1): те саме вікно вже знає, що теки за цим шляхом
-    // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`) і саме з
-    // нього намальовано `settings_folders_rule_gone` у переліку правил тієї ж
-    // панелі. Поки питання казало «її текст надсилається провайдеру» над
-    // правилом, чия тека зникла, дві фрази однієї панелі суперечили одна одній
-    // про ту саму теку.
+    // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`). Поки
+    // питання казало «її текст надсилається провайдеру» над правилом, чия тека
+    // зникла, воно суперечило тому, що вікно вже прочитало про ту саму теку.
     // Це не вигадування числа — числа тут як не було, так і немає; це той самий
     // факт, уже прочитаний, сказаний у питанні. Наслідок лишається названим, бо
     // тека може повернутися, а правила вже не буде.
@@ -739,7 +736,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_hint: 'Маски діють у всіх теках і порівнюються з назвою файлу, напр. *.log.',
     settings_masks_remove_selected: 'Видалити виділену маску',
     settings_masks_input_label: 'Нова маска:',
-    settings_masks_remove: 'Видалити',
     settings_masks_remove_named: 'Видалити маску {mask}',
     settings_masks_checking: 'Перевіряємо, що прибере ця маска…',
     settings_masks_load_failed: 'Не вдалося прочитати список масок.',
@@ -1403,7 +1399,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_hint: 'Masks apply in every folder and match the file name, e.g. *.log.',
     settings_masks_remove_selected: 'Remove the selected mask',
     settings_masks_input_label: 'New mask:',
-    settings_masks_remove: 'Remove',
     settings_masks_remove_named: 'Remove the mask {mask}',
     settings_masks_checking: 'Checking what this mask removes…',
     settings_masks_load_failed: 'The list of masks could not be read.',
