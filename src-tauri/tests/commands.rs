@@ -15337,6 +15337,61 @@ fn a_failure_under_gitignore_is_not_shown_or_counted() {
     assert_eq!(tree["roots"][0]["failed"], json!(1), "{tree}");
 }
 
+/// A collapsed folder must know what `.gitignore` holds under it, so its tick
+/// is `–` before it is opened (owner, 2026-11-13): before this the window only
+/// saw held rows on levels it had loaded.
+#[test]
+fn a_folder_says_gitignore_holds_something_below_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    let f = fixture.path();
+    std::fs::create_dir_all(f.join("a/deep")).unwrap();
+    std::fs::write(f.join("a/deep/.gitignore"), ".env\n").unwrap();
+    std::fs::write(f.join("a/deep/.env"), "x").unwrap();
+    std::fs::write(f.join("a/deep/keep.txt"), "x").unwrap();
+    std::fs::create_dir(f.join("b")).unwrap();
+    std::fs::write(f.join("b/keep.txt"), "x").unwrap();
+    let root = root_for(&webview, f);
+    let below = |path: &str| {
+        let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+        let level = listing_of(&webview, root, parent);
+        level["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["relativePath"] == path)
+            .unwrap_or_else(|| panic!("{path} not in {level}"))["gitignoredBelow"]
+            .clone()
+    };
+    assert_eq!(below("a"), json!(true));
+    assert_eq!(below("a/deep"), json!(true));
+    assert_eq!(below("b"), json!(false));
+    assert_eq!(below("a/deep/keep.txt"), json!(false));
+
+    // Ticked back past `.gitignore`: nothing is held any more.
+    call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "a/deep/.env", "tick": "on" }),
+    )
+    .expect("ticking .env back was rejected");
+    assert_eq!(below("a"), json!(false));
+
+    // Held, with an include deeper inside (`gitIgnoredOpen`): still `–`.
+    std::fs::create_dir_all(f.join("b/build")).unwrap();
+    std::fs::write(f.join("b/.gitignore"), "build/\n").unwrap();
+    std::fs::write(f.join("b/build/keep.txt"), "x").unwrap();
+    call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "b/build/keep.txt", "tick": "on" }),
+    )
+    .expect("ticking build/keep.txt was rejected");
+    assert_eq!(below("b"), json!(true));
+}
+
 /// On the BODY of the scan: the include reaches the walk, and only its path.
 #[test]
 fn the_scan_indexes_an_included_file_and_nothing_beside_it() {

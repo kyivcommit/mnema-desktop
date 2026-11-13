@@ -519,7 +519,7 @@ test('a language switch reaches the empty-state sentence too', async () => {
 function sub(name: string, state: SubfolderState = { kind: 'open' }, parent = ''): Subfolder {
   return {
     name, relativePath: parent ? `${parent}/${name}` : name, isDir: true, state,
-    failure: null, failedBelow: 0,
+    failure: null, failedBelow: 0, gitignoredBelow: false,
   };
 }
 // A FILE row (folders tree PR 2): no chevron, a tick, and its own marks.
@@ -3749,21 +3749,24 @@ test('an included row is ticked and tagged gitignore · included only on its own
 
 // Owner's ruling 2026-11-12 (after PR #102): what `.gitignore` names is as if
 // the person had unticked it, so its folder shows `–` like for an exclusion —
-// and the `–` click asks to tick everything inside, as for a rule.
-test('a folder whose loaded child is gitignored shows the mixed tick and its click ticks everything', async () => {
+// and the `–` click asks to tick everything inside, as for a rule. Owner,
+// 2026-11-13: collapsed too — the shell's `gitignoredBelow` says it, and the
+// root is `–` before anything is opened.
+test('a folder with a gitignored row below shows the mixed tick collapsed and open, and its click ticks everything', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listSubfolders.mockImplementation((_rootId: number, path: string) =>
     Promise.resolve(path === ''
-      ? subfolders([sub('a')])
+      ? subfolders([{ ...sub('a'), gitignoredBelow: true }, sub('b')])
       : subfolders([fileRow('.env', { kind: 'gitIgnored', by: 'a/.env' }, 'a'), fileRow('y.txt', { kind: 'open' }, 'a')])));
   listExclusions.mockResolvedValue([]);
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   const collapsed = await screen.findByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
-  // Collapsed: nothing loaded says so — a walk per row would be the cost.
-  expect(collapsed.indeterminate).toBe(false);
+  expect(collapsed.indeterminate).toBe(true);
+  expect((screen.getByRole('checkbox', { name: 'Index b' }) as HTMLInputElement).indeterminate).toBe(false);
+  await waitFor(() => expect(screen.getByTestId('folder-root-mark-1').textContent).toBe('–'));
   await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
   await waitFor(() => expect(screen.getByTestId('subfolder-1-a/.env')).toBeTruthy());
 
@@ -4022,8 +4025,8 @@ test('the popup keeps the keyboard: Tab wraps, focus outside returns, Esc anywhe
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
-// PR #103 review 3: the root and a folder read `.gitignore` off every LOADED
-// level, not only the one right under them, so the root never says
+// PR #103 review 3: the root and a folder read `.gitignore` off every level
+// (since 2026-11-13 from the shell's `gitignoredBelow`), so the root never says
 // "Everything is indexed" over a `–` it can see — and a held-but-open folder
 // one level down makes its parent `–` too.
 test('a gitignored row deep in an open folder makes the folder and the root mixed', async () => {
@@ -4031,7 +4034,7 @@ test('a gitignored row deep in an open folder makes the folder and the root mixe
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listExclusions.mockResolvedValue([]);
   listSubfolders.mockImplementation((_rootId: number, path: string) => Promise.resolve(subfolders(
-    path === '' ? [sub('sub'), sub('other')]
+    path === '' ? [{ ...sub('sub'), gitignoredBelow: true }, sub('other')]
     : path === 'sub' ? [sub('keep', undefined, 'sub'), sub('vendor', { kind: 'gitIgnoredOpen', by: 'sub/vendor' }, 'sub')]
     : [],
   )));

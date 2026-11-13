@@ -364,8 +364,8 @@ test('listSubfolders asks for the root level with an empty path, not without one
 test('listSubfolders returns the listing whole — the state tag and its payload included', async () => {
   const listing: SubfolderListing = {
     entries: [
-      { name: 'private', relativePath: 'Work/private', isDir: true, state: { kind: 'excludedByAncestor', prefix: 'Work' }, failure: null, failedBelow: 0 },
-      { name: 'notes', relativePath: 'Work/notes', isDir: true, state: { kind: 'open' }, failure: null, failedBelow: 0 },
+      { name: 'private', relativePath: 'Work/private', isDir: true, state: { kind: 'excludedByAncestor', prefix: 'Work' }, failure: null, failedBelow: 0, gitignoredBelow: false },
+      { name: 'notes', relativePath: 'Work/notes', isDir: true, state: { kind: 'open' }, failure: null, failedBelow: 0, gitignoredBelow: false },
     ],
     unnameable: 2,
   };
@@ -550,7 +550,7 @@ test('SubfolderState is exactly what tree.rs defines, in the spelling serde send
 // count and set_tick's answer — each against the struct that owns it.
 const SUBFOLDER_FIXTURE: Subfolder = {
   name: 'a.pdf', relativePath: 'Work/a.pdf', isDir: false, state: { kind: 'open' },
-  failure: { rule: 'timeout', reason: 'took too long' }, failedBelow: 0,
+  failure: { rule: 'timeout', reason: 'took too long' }, failedBelow: 0, gitignoredBelow: false,
 };
 test('Subfolder is exactly what tree.rs defines, field for field', () => {
   expect(Object.keys(SUBFOLDER_FIXTURE).sort()).toEqual(
@@ -582,7 +582,7 @@ test('the subfolder wire types reject Rust snake_case spellings', () => {
   const listing: SubfolderListing = {
     entries: [{
       name: 'private', relativePath: 'Work/private', isDir: true, state: { kind: 'open' },
-      failure: null, failedBelow: 0,
+      failure: null, failedBelow: 0, gitignoredBelow: false,
       // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
       relative_path: 'Work/private',
     }],

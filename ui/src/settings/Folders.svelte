@@ -248,12 +248,12 @@
     return e instanceof Error ? e.message : String(e);
   }
 
-  // Whether a LOADED level at or under `tree` holds a row `.gitignore` names —
-  // as if the person had unticked it (owner's ruling 2026-11-12). A collapsed
-  // folder cannot know without a walk per row, so unloaded levels say nothing.
-  function holdsGitignored(tree: SubTree): boolean {
-    return tree.listing.entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen')
-      || Object.values(tree.children).some(holdsGitignored);
+  // Whether `.gitignore` holds a row of this level or under it — as if the
+  // person had unticked it (owner's ruling 2026-11-12). The shell walks the
+  // subtree for `gitignoredBelow`, so a collapsed folder knows it too (owner,
+  // 2026-11-13: the tick must not change when the folder is opened).
+  function holdsGitignored(entries: Subfolder[]): boolean {
+    return entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen' || e.gitignoredBelow);
   }
 
   function patch(rootId: number, fields: Partial<Panel>) {
@@ -265,7 +265,7 @@
       // A row `.gitignore` names counts as unticked (owner's ruling
       // 2026-11-12), on any loaded level, as for a folder's mixed box.
       const some = next.rules.some((r) => r.existsOnDisk)
-        || (next.tree !== null && holdsGitignored(next.tree));
+        || (next.tree !== null && holdsGitignored(next.tree.listing.entries));
       marks = { ...marks, [rootId]: { path: panel.rootPath, some } };
     }
   }
@@ -1459,8 +1459,8 @@
           heldBelow(rules, entry.relativePath)
           || entry.state.kind === 'gitIgnoredOpen'
           // What `.gitignore` names is as if the person had unticked it, so
-          // its folder is `–`, as for a rule (`holdsGitignored`).
-          || (child !== undefined && holdsGitignored(child))
+          // its folder is `–`, as for a rule — opened or not.
+          || entry.gitignoredBelow
         ),
         tag: control === 'none' ? sentence : gitTag(entry),
         mark:

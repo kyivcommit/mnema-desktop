@@ -166,10 +166,11 @@ export type SubfolderState =
 // `isDir`: files are listed since the folders tree PR 2. `failure`: the last
 // scan could not read this file (only on a row that is indexed).
 // `failedBelow`: for a folder, how many shown failures sit strictly under it.
+// `gitignoredBelow`: for a walked folder, `.gitignore` holds a row under it.
 export type ScanFailure = { rule: string; reason: string };
 export type Subfolder = {
   name: string; relativePath: string; isDir: boolean; state: SubfolderState;
-  failure: ScanFailure | null; failedBelow: number;
+  failure: ScanFailure | null; failedBelow: number; gitignoredBelow: boolean;
 };
 
 // A struct rather than a bare array because of `unnameable`: directory entries

@@ -349,7 +349,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         held !== undefined ? { kind: 'excludedByAncestor', prefix: held }
         : rules.includes(path) ? { kind: 'excluded' } : git(path) ?? { kind: 'open' };
       const row = (name: string, isDir: boolean, extra: Record<string, unknown> = {}) => ({
-        name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, ...extra,
+        name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, gitignoredBelow: false, ...extra,
       });
       const entries = dir === ''
         ? [

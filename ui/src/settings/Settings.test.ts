@@ -1042,7 +1042,7 @@ const ONE_ROOT = {
   }],
 };
 const ONE_SUBFOLDER = {
-  entries: [{ name: 'drop', relativePath: 'drop', isDir: true, state: { kind: 'open' }, failure: null, failedBelow: 0 }],
+  entries: [{ name: 'drop', relativePath: 'drop', isDir: true, state: { kind: 'open' }, failure: null, failedBelow: 0, gitignoredBelow: false }],
   unnameable: 0,
 };
 

@@ -1073,6 +1073,11 @@ pub struct Subfolder {
     /// For a folder: how many files strictly under it carry a shown failure,
     /// so a collapsed level does not hide one. `0` for a file.
     pub failed_below: u64,
+    /// For a walked folder: `.gitignore` holds a row strictly under it that no
+    /// include lifts — as if the person had unticked it (owner, 2026-11-12) —
+    /// so a collapsed folder's tick is `–` too. Filled by `list_subfolders`
+    /// only; `false` for a file.
+    pub gitignored_below: bool,
 }
 
 /// One whole-file verdict from the `skipped` table, as the tree shows it: the
@@ -1660,6 +1665,7 @@ pub(crate) fn read_subfolders(
             state,
             failure,
             failed_below,
+            gitignored_below: false,
         });
     }
     listed.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1749,7 +1755,48 @@ pub fn list_subfolders(
         &skips,
         &git,
     );
-    read_level(&dir, root_id, &relative_path, &rules)
+    let mut listing = read_level(&dir, root_id, &relative_path, &rules)?;
+    for entry in &mut listing.entries {
+        if entry.is_dir
+            && matches!(
+                entry.state,
+                SubfolderState::Open | SubfolderState::UnusableName
+            )
+        {
+            entry.gitignored_below =
+                holds_gitignored(&root_canonical, &rules, &entry.relative_path);
+        }
+    }
+    Ok(listing)
+}
+
+/// Whether `.gitignore` holds a row strictly under the walked folder
+/// `relative`, by the same per-row states the listing draws, so a collapsed
+/// folder agrees with what opening it would show. Enters only folders the walk
+/// enters (`Open`, `UnusableName`) and stops at the first held row. A folder it
+/// cannot read says nothing: opening it would refuse, not show a held row.
+// shortcut: re-walks the subtree on every expand (~0.1 s for 31k entries);
+// cache per root if a root grows past ~1M entries.
+fn holds_gitignored(root: &Path, rules: &LevelRules<'_>, relative: &str) -> bool {
+    let Ok(read) = std::fs::read_dir(root.join(relative)) else {
+        return false;
+    };
+    let Ok(entries) = directory_entries(read) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        let Some(name) = entry.name.to_str() else {
+            return false;
+        };
+        let path = format!("{relative}/{name}");
+        match subfolder_state(rules, &path, entry) {
+            SubfolderState::GitIgnored { .. } | SubfolderState::GitIgnoredOpen { .. } => true,
+            SubfolderState::Open | SubfolderState::UnusableName => {
+                entry.is_dir && holds_gitignored(root, rules, &path)
+            }
+            _ => false,
+        }
+    })
 }
 
 /// One level of the disk at `dir` (already resolved by [`subfolder_dir`]),
@@ -1912,6 +1959,7 @@ mod tests {
             state,
             failure: None,
             failed_below: 0,
+            gitignored_below: false,
         };
         SubfolderListing {
             entries: vec![
@@ -1942,6 +1990,7 @@ mod tests {
                         reason: "took too long".to_string(),
                     }),
                     failed_below: 4,
+                    gitignored_below: false,
                     ..row("slow", SubfolderState::Open)
                 },
                 row(

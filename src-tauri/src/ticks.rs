@@ -515,6 +515,7 @@ mod tests {
                         state,
                         failure: None,
                         failed_below: 0,
+                        gitignored_below: false,
                     }
                 })
                 .collect();
