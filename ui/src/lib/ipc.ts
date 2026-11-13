@@ -190,6 +190,9 @@ export const listSubfolders = (rootId: number, relativePath: string) =>
   invoke<SubfolderListing>('list_subfolders', { rootId, relativePath });
 export const listExclusions = (rootId: number) =>
   invoke<StoredExclusion[]>('list_exclusions', { rootId });
+// The root's `–` (true) or `✓` (false) without opening it: a rule whose folder
+// is there, or a row `.gitignore` holds under the root.
+export const rootMark = (rootId: number) => invoke<boolean>('root_mark', { rootId });
 export const excludeSubfolder = (rootId: number, relativePath: string) =>
   invoke<void>('exclude_subfolder', { rootId, relativePath });
 // Answers whether a row actually went, and the caller has to carry that

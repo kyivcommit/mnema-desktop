@@ -86,6 +86,7 @@ const providerModels = vi.fn();
 const listTree = vi.fn();
 const listSubfolders = vi.fn();
 const listExclusions = vi.fn();
+const rootMark = vi.fn();
 const excludeSubfolder = vi.fn();
 const listMasks = vi.fn();
 const maskPreview = vi.fn();
@@ -132,6 +133,7 @@ vi.mock('../lib/ipc', () => ({
   listTree: (...a: unknown[]) => listTree(...a),
   listSubfolders: (...a: unknown[]) => listSubfolders(...a),
   listExclusions: (...a: unknown[]) => listExclusions(...a),
+  rootMark: (...a: unknown[]) => rootMark(...a),
   excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
   includeSubfolder: vi.fn(),
   // Task 11 mounts `Masks` into the same panel, and it reads the mask list on
@@ -195,6 +197,8 @@ beforeEach(() => {
   listSubfolders.mockReset();
   listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
   listExclusions.mockReset();
+  rootMark.mockReset();
+  rootMark.mockResolvedValue(false);
   listExclusions.mockResolvedValue([]);
   excludeSubfolder.mockReset();
   // The empty mask list this file has always answered with, now through a

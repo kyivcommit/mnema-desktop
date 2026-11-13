@@ -370,6 +370,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
           ];
       return { entries, unnameable: 0 };
     },
+    // `build` at the top is what `.gitignore` holds in this bench, unless ticked back whole.
+    root_mark: (a) => (s.exclusions.get(a.rootId as number) ?? []).length > 0
+      || !(s.includes.get(a.rootId as number) ?? []).includes('build'),
     list_exclusions: (a) => (s.exclusions.get(a.rootId as number) ?? []).map((prefix) => ({ prefix, existsOnDisk: true })),
     exclude_subfolder: (a) => {
       const id = a.rootId as number;

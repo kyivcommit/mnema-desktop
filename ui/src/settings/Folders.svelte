@@ -5,7 +5,7 @@
   import { locale, t } from '../i18n';
   import {
     listTree, addWatchedFolder, removeWatchedFolder, confirmWatchedFolder,
-    listSubfolders, listExclusions, setTick, previewTick,
+    listSubfolders, listExclusions, rootMark, setTick, previewTick,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
@@ -268,6 +268,22 @@
         || (next.tree !== null && holdsGitignored(next.tree.listing.entries));
       marks = { ...marks, [rootId]: { path: panel.rootPath, some } };
     }
+  }
+
+  // The mark of a shut root, asked of the shell. A panel read that starts while
+  // this is on the wire bumps `generations` and answers itself, so this reply
+  // is dropped; a failure leaves no mark rather than a `✓` that could be false.
+  async function readMark(root: TreeRoot) {
+    const generation = generations[root.rootId] ?? 0;
+    let some: boolean;
+    try {
+      some = await rootMark(root.rootId);
+    } catch {
+      return;
+    }
+    if ((generations[root.rootId] ?? 0) !== generation) return;
+    if (!roots.some((r) => r.rootId === root.rootId && r.absolutePath === root.absolutePath)) return;
+    marks = { ...marks, [root.rootId]: { path: root.absolutePath, some } };
   }
 
   // A click on a root selects it for `−` and opens it; it never shuts it.
@@ -898,6 +914,9 @@
     if (Object.keys(kept).length !== Object.keys(panels).length) panels = kept;
     loadError = null; // a successful read is proof the earlier one is stale
     if (chosen !== null && !namesFolder(listing, chosen.rootId, chosen.path)) chosen = null;
+    // Owner, 2026-11-13: every root's ✓ or – is there when the window opens,
+    // not only after its panel has been read once.
+    for (const root of listing.roots) void readMark(root);
     // D202: a folder added from the launcher arrives here unconfirmed. Nothing
     // chosen yet — open it, so its ticks and Start are what the window shows.
     if (chosen === null) {

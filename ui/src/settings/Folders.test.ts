@@ -25,6 +25,7 @@ const confirmWatchedFolder = vi.fn();
 // `ipc.test.ts` owns the argument names each of these sends.
 const listSubfolders = vi.fn();
 const listExclusions = vi.fn();
+const rootMark = vi.fn();
 const excludeSubfolder = vi.fn();
 const includeSubfolder = vi.fn();
 const setTick = vi.fn();
@@ -40,6 +41,7 @@ vi.mock('../lib/ipc', async (real) => ({
   confirmWatchedFolder: (...a: unknown[]) => confirmWatchedFolder(...a),
   listSubfolders: (...a: unknown[]) => listSubfolders(...a),
   listExclusions: (...a: unknown[]) => listExclusions(...a),
+  rootMark: (...a: unknown[]) => rootMark(...a),
   excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
   includeSubfolder: (...a: unknown[]) => includeSubfolder(...a),
   setTick: (...a: unknown[]) => setTick(...a),
@@ -100,6 +102,8 @@ beforeEach(() => {
   open.mockReset();
   listSubfolders.mockReset();
   listExclusions.mockReset();
+  rootMark.mockReset();
+  rootMark.mockResolvedValue(false);
   // Selecting a root opens it (spec), so every test that presses «Remove» also
   // reads a listing; an empty one unless the test says otherwise.
   listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
@@ -3401,12 +3405,51 @@ test('with nothing selected, a re-read selects the first unconfirmed folder and 
   await waitFor(() => expect(screen.getByTestId('folder-panel-3')).toBeTruthy());
 });
 
-test('the root mark is blank until its rules are read, then ✓ or –, and stays when shut', async () => {
+// Owner, 2026-11-13: the mark is there when the window opens — asked of the
+// shell for every root — and blank only where that question failed.
+test('every root is marked ✓ or – before any panel is opened, and blank when the shell cannot say', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+    root({ rootId: 3, absolutePath: '/synthetic/gone' }),
+  ]));
+  rootMark.mockImplementation((rootId: number) =>
+    rootId === 3 ? Promise.reject(new Error('unmounted')) : Promise.resolve(rootId === 1));
+  render(Folders, { props: { jobs: createJobController() } });
+  const mark = (id: number) => screen.getByTestId(`folder-root-mark-${id}`);
+  await waitFor(() => expect(mark(1).textContent).toBe('–'));
+  await waitFor(() => expect(mark(2).textContent).toBe('✓'));
+  expect(mark(3).textContent).toBe('');
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+  expect(listSubfolders).not.toHaveBeenCalled();
+});
+
+test('a mark the shell gives after a panel read started is not drawn over the panel\'s', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  let answer: (some: boolean) => void = () => {};
+  rootMark.mockImplementation(() => new Promise<boolean>((resolve) => { answer = resolve; }));
+  listExclusions.mockResolvedValue([{ prefix: 'Work', existsOnDisk: true }]);
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(rootMark).toHaveBeenCalledWith(1));
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  const mark = screen.getByTestId('folder-root-mark-1');
+  await waitFor(() => expect(mark.textContent).toBe('–'));
+
+  answer(false);
+  await tick_();
+  await Promise.resolve();
+  expect(mark.textContent).toBe('–');
+});
+
+test('the root mark follows its rules once they are read, then ✓ or –, and stays when shut', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root' }),
     root({ rootId: 2, absolutePath: '/synthetic/other' }),
   ]));
+  rootMark.mockImplementation(() => new Promise<boolean>(() => {})); // never answers
   listExclusions.mockImplementation((rootId: number) => Promise.resolve(
     rootId === 1 ? [{ prefix: 'Work', existsOnDisk: true }] : [{ prefix: 'Gone', existsOnDisk: false }],
   ));

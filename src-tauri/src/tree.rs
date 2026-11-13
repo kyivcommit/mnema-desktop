@@ -1702,6 +1702,54 @@ pub fn list_subfolders(
     root_id: i64,
     relative_path: String,
 ) -> Result<SubfolderListing, Error> {
+    on_level(&state, root_id, |root, rules| {
+        let dir = subfolder_dir(root, root_id, &relative_path)?;
+        // After containment, never before: `..` and an absolute path are refused
+        // by the rule above with a sentence about where they resolve, which is the
+        // more specific answer and the one three tests assert. What is left for
+        // this to catch is a path that stays inside the root and still cannot be a
+        // rule — `a/.`, `a//b`, a component with a backslash — and it is refused
+        // with `WalkRules`'s own sentence, the same one `exclude_subfolder` would
+        // give, because every `relativePath` this call would emit has this path as
+        // its ancestor and would inherit the refusal.
+        WalkRules::check_prefix(&relative_path)?;
+        let mut listing = read_level(&dir, root_id, &relative_path, rules)?;
+        for entry in &mut listing.entries {
+            if entry.is_dir
+                && matches!(
+                    entry.state,
+                    SubfolderState::Open | SubfolderState::UnusableName
+                )
+            {
+                entry.gitignored_below = holds_gitignored(root, rules, &entry.relative_path);
+            }
+        }
+        Ok(listing)
+    })
+}
+
+/// Whether the root's tick is `–`: a rule of the person's whose path is still
+/// on disk, or a row `.gitignore` holds anywhere a scan walks — the same two
+/// facts the settings tree reads off an open panel, answered for a shut one
+/// so the mark is there when the window opens (owner, 2026-11-13).
+#[tauri::command(async)]
+pub fn root_mark(state: State<'_, AppState>, root_id: i64) -> Result<bool, Error> {
+    on_level(&state, root_id, |root, rules| {
+        Ok(rules
+            .prefixes
+            .iter()
+            .any(|prefix| crate::bridge::prefix_exists_on_disk(root, prefix))
+            || holds_gitignored(root, rules, ""))
+    })
+}
+
+/// The root and the rules its rows are decided by — what [`list_subfolders`]
+/// and [`root_mark`] both ask, so the two cannot read different rules.
+fn on_level<R>(
+    state: &AppState,
+    root_id: i64,
+    f: impl FnOnce(&Path, &LevelRules<'_>) -> Result<R, Error>,
+) -> Result<R, Error> {
     let root = state
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
@@ -1716,16 +1764,6 @@ pub fn list_subfolders(
     let root_canonical = root_path
         .canonicalize()
         .map_err(|_| Error::RootUnavailable(root_id))?;
-    let dir = subfolder_dir(&root_canonical, root_id, &relative_path)?;
-    // After containment, never before: `..` and an absolute path are refused
-    // by the rule above with a sentence about where they resolve, which is the
-    // more specific answer and the one three tests assert. What is left for
-    // this to catch is a path that stays inside the root and still cannot be a
-    // rule — `a/.`, `a//b`, a component with a backslash — and it is refused
-    // with `WalkRules`'s own sentence, the same one `exclude_subfolder` would
-    // give, because every `relativePath` this call would emit has this path as
-    // its ancestor and would inherit the refusal.
-    WalkRules::check_prefix(&relative_path)?;
     let (prefixes, mask_names, skips, includes) = state.with_index(|db| {
         Ok::<_, mnema_index::Error>((
             db.list_path_exclusions(root_id)?,
@@ -1755,19 +1793,7 @@ pub fn list_subfolders(
         &skips,
         &git,
     );
-    let mut listing = read_level(&dir, root_id, &relative_path, &rules)?;
-    for entry in &mut listing.entries {
-        if entry.is_dir
-            && matches!(
-                entry.state,
-                SubfolderState::Open | SubfolderState::UnusableName
-            )
-        {
-            entry.gitignored_below =
-                holds_gitignored(&root_canonical, &rules, &entry.relative_path);
-        }
-    }
-    Ok(listing)
+    f(&root_canonical, &rules)
 }
 
 /// Whether `.gitignore` holds a row strictly under the walked folder
@@ -1788,7 +1814,11 @@ fn holds_gitignored(root: &Path, rules: &LevelRules<'_>, relative: &str) -> bool
         let Some(name) = entry.name.to_str() else {
             return false;
         };
-        let path = format!("{relative}/{name}");
+        let path = if relative.is_empty() {
+            name.to_string()
+        } else {
+            format!("{relative}/{name}")
+        };
         match subfolder_state(rules, &path, entry) {
             SubfolderState::GitIgnored { .. } | SubfolderState::GitIgnoredOpen { .. } => true,
             SubfolderState::Open | SubfolderState::UnusableName => {

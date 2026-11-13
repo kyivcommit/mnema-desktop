@@ -15392,6 +15392,40 @@ fn a_folder_says_gitignore_holds_something_below_it() {
     assert_eq!(below("b"), json!(true));
 }
 
+/// The root's mark before any panel is opened (owner, 2026-11-13): `–` for a
+/// row `.gitignore` holds anywhere under the root or a rule whose folder is
+/// there, `✓` for neither — and a rule whose folder is gone excludes nothing.
+#[test]
+fn root_mark_says_whether_anything_under_the_root_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let mark = |root: i64| call(&webview, "root_mark", json!({ "rootId": root })).unwrap();
+
+    let plain = tempfile::tempdir().unwrap();
+    std::fs::create_dir(plain.path().join("a")).unwrap();
+    std::fs::write(plain.path().join("a/x.txt"), "x").unwrap();
+    let plain_root = root_for(&webview, plain.path());
+    assert_eq!(mark(plain_root), json!(false));
+
+    let ignored = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ignored.path().join("a/deep")).unwrap();
+    std::fs::write(ignored.path().join("a/deep/.gitignore"), ".env\n").unwrap();
+    std::fs::write(ignored.path().join("a/deep/.env"), "x").unwrap();
+    let ignored_root = root_for(&webview, ignored.path());
+    assert_eq!(mark(ignored_root), json!(true));
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": plain_root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+    assert_eq!(mark(plain_root), json!(true));
+    std::fs::remove_dir_all(plain.path().join("a")).unwrap();
+    assert_eq!(mark(plain_root), json!(false));
+}
+
 /// On the BODY of the scan: the include reaches the walk, and only its path.
 #[test]
 fn the_scan_indexes_an_included_file_and_nothing_beside_it() {

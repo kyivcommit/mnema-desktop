@@ -207,7 +207,7 @@ case_ "an absolute relative_path must be refused, which only the containment hal
 # exclude.
 case_ "a folder that cannot be resolved is refused, never answered as an empty listing" \
   src-tauri/src/tree.rs \
-  's~    let dir = subfolder_dir\(&root_canonical, root_id, &relative_path\)\?;~    let Ok(dir) = subfolder_dir(\&root_canonical, root_id, \&relative_path) else {\n        /* mutant: empty instead of a refusal */\n        return Ok(SubfolderListing { entries: Vec::new(), unnameable: 0 });\n    };~' \
+  's~        let dir = subfolder_dir\(root, root_id, &relative_path\)\?;~        let Ok(dir) = subfolder_dir(root, root_id, \&relative_path) else {\n            /* mutant: empty instead of a refusal */\n            return Ok(SubfolderListing { entries: Vec::new(), unnameable: 0 });\n        };~' \
   '/* mutant: empty instead of a refusal */' \
   mnema-desktop 'listing_a_folder_that_is_not_there_is_refused_rather_than_answered_empty' --test commands
 
@@ -346,7 +346,7 @@ case_ "a name the validator refuses says so instead of offering a control" \
 # whose every `relativePath` `exclude_subfolder` will refuse.
 case_ "a relative_path that cannot be a rule is refused before any row is built" \
   src-tauri/src/tree.rs \
-  's~    WalkRules::check_prefix\(&relative_path\)\?;~    /* mutant: the asked-for path is not validated */~' \
+  's~        WalkRules::check_prefix\(&relative_path\)\?;~        /* mutant: the asked-for path is not validated */~' \
   '/* mutant: the asked-for path is not validated */' \
   mnema-desktop 'a_relative_path_that_cannot_be_a_rule_is_refused_with_the_validators_sentence' --test commands
 
