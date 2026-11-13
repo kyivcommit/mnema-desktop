@@ -862,6 +862,9 @@ test('Escape while the preview is in flight raises no question when it lands', a
   await new Promise((r) => setTimeout(r, 0));
 
   expect(screen.queryByTestId('mask-confirm')).toBeNull();
+  // `+` is enabled again only because `dismiss()` cleared `checking`; a
+  // disabled button would take no focus and leave it on the page.
+  await waitFor(() => expect(document.activeElement).toBe(addButton()));
 });
 
 // PR #100 review 3. Enter is the same press as `+`, so it obeys the same rule:
