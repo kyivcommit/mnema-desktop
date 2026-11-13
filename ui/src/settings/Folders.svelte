@@ -914,14 +914,18 @@
     if (Object.keys(kept).length !== Object.keys(panels).length) panels = kept;
     loadError = null; // a successful read is proof the earlier one is stale
     if (chosen !== null && !namesFolder(listing, chosen.rootId, chosen.path)) chosen = null;
-    // Owner, 2026-11-13: every root's ✓ or – is there when the window opens,
-    // not only after its panel has been read once.
-    for (const root of listing.roots) void readMark(root);
     // D202: a folder added from the launcher arrives here unconfirmed. Nothing
     // chosen yet — open it, so its ticks and Start are what the window shows.
     if (chosen === null) {
       const waiting = listing.roots.find((r) => !r.confirmed);
       if (waiting !== undefined) selectRoot(waiting);
+    }
+    // Owner, 2026-11-13: every root's ✓ or – is there when the window opens,
+    // not only after its panel has been read once. After `selectRoot`, and not
+    // for an open panel: its own read gives the mark, and would drop this
+    // reply after the shell had walked the whole root for nothing.
+    for (const root of listing.roots) {
+      if (panels[root.rootId] === undefined) void readMark(root);
     }
   }
 

@@ -386,6 +386,15 @@ test('listExclusions takes the root id and nothing else', async () => {
   expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['rootId']);
 });
 
+test('rootMark takes the root id and nothing else', async () => {
+  invoke.mockResolvedValue(true);
+
+  await expect(ipc.rootMark(4)).resolves.toBe(true);
+
+  expect(invoke).toHaveBeenCalledWith('root_mark', { rootId: 4 });
+  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['rootId']);
+});
+
 test('listExclusions returns each stored rule with its own existsOnDisk', async () => {
   const rules: StoredExclusion[] = [
     { prefix: 'Old notes', existsOnDisk: false },

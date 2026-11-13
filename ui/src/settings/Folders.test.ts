@@ -3425,6 +3425,20 @@ test('every root is marked ✓ or – before any panel is opened, and blank when
   expect(listSubfolders).not.toHaveBeenCalled();
 });
 
+// PR #104 review: a root whose panel opens in the same read is not walked by
+// the shell twice — its panel's read gives the mark.
+test('a root opened by the window itself is not asked for its mark', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/waiting', confirmed: false }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByTestId('folder-panel-1')).toBeTruthy());
+  await waitFor(() => expect(rootMark).toHaveBeenCalledWith(2));
+  expect(rootMark).not.toHaveBeenCalledWith(1);
+});
+
 test('a mark the shell gives after a panel read started is not drawn over the panel\'s', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
