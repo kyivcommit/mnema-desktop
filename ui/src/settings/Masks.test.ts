@@ -825,6 +825,8 @@ test('Escape closes the field and keeps no draft', async () => {
   await fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
 
   expect(screen.queryByRole('textbox')).toBeNull();
+  // The focus goes back to `+`, not to the page (PR #100 review, deferred).
+  await waitFor(() => expect(document.activeElement).toBe(addButton()));
   await fireEvent.click(addButton());
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('');
   expect(maskPreview).not.toHaveBeenCalled();
@@ -860,6 +862,9 @@ test('Escape while the preview is in flight raises no question when it lands', a
   await new Promise((r) => setTimeout(r, 0));
 
   expect(screen.queryByTestId('mask-confirm')).toBeNull();
+  // `+` is enabled again only because `dismiss()` cleared `checking`; a
+  // disabled button would take no focus and leave it on the page.
+  await waitFor(() => expect(document.activeElement).toBe(addButton()));
 });
 
 // PR #100 review 3. Enter is the same press as `+`, so it obeys the same rule:

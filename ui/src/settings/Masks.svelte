@@ -46,6 +46,7 @@
   // The field opens from `+` and closes on Esc or once a mask is added.
   let fieldOpen = $state(false);
   let field = $state<HTMLInputElement | null>(null);
+  let addButtonEl = $state<HTMLButtonElement | null>(null);
   // The mask `−` acts on. A mask that leaves the list leaves the choice with it
   // (`chosenRow` below finds nothing).
   let chosen = $state<string | null>(null);
@@ -288,7 +289,6 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_masks_none'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_masks_add'); });
   const inputLabel = $derived.by(() => { void $locale; return t('settings_masks_input_label'); });
-  const removeLabel = $derived.by(() => { void $locale; return t('settings_masks_remove'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_masks_load_failed'); });
   const alreadyStoredLabel = $derived.by(() => {
     void $locale;
@@ -321,6 +321,8 @@
       // A withdrawal, like Cancel: a preview still on the wire must not raise
       // the question after the person closed the field.
       if (pending?.kind === 'checking') dismiss();
+      // The field goes with the focus in it: hand it to `+`, not to the page.
+      void tick().then(() => addButtonEl?.focus());
     }
   }
 
@@ -539,6 +541,7 @@
       <button
         type="button"
         data-testid="masks-add"
+        bind:this={addButtonEl}
         aria-label={addLabel}
         title={addLabel}
         disabled={pending?.kind === 'checking' || (fieldOpen && draft === '')}

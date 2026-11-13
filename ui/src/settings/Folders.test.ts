@@ -3425,6 +3425,15 @@ test('every root is marked ✓ or – before any panel is opened, and blank when
   expect(listSubfolders).not.toHaveBeenCalled();
 });
 
+// PR #101 review, deferred: a file row draws the file icon, a folder row the
+// folder one.
+test('a file row and a folder row each draw their own icon', async () => {
+  await expand([sub('Work'), fileRow('a.pdf')]);
+  const icon = (path: string) => screen.getByTestId(`subfolder-1-${path}`).querySelector('svg.ico')!.getAttribute('data-icon');
+  expect(icon('Work')).toBe('folder');
+  expect(icon('a.pdf')).toBe('file');
+});
+
 // PR #104 review: a root whose panel opens in the same read is not walked by
 // the shell twice — its panel's read gives the mark.
 test('a root opened by the window itself is not asked for its mark', async () => {
