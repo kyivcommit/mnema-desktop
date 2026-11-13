@@ -207,7 +207,7 @@ case_ "an absolute relative_path must be refused, which only the containment hal
 # exclude.
 case_ "a folder that cannot be resolved is refused, never answered as an empty listing" \
   src-tauri/src/tree.rs \
-  's~    let dir = subfolder_dir\(&root_canonical, root_id, &relative_path\)\?;~    let Ok(dir) = subfolder_dir(\&root_canonical, root_id, \&relative_path) else {\n        /* mutant: empty instead of a refusal */\n        return Ok(SubfolderListing { entries: Vec::new(), unnameable: 0 });\n    };~' \
+  's~        let dir = subfolder_dir\(root, root_id, &relative_path\)\?;~        let Ok(dir) = subfolder_dir(root, root_id, \&relative_path) else {\n            /* mutant: empty instead of a refusal */\n            return Ok(SubfolderListing { entries: Vec::new(), unnameable: 0 });\n        };~' \
   '/* mutant: empty instead of a refusal */' \
   mnema-desktop 'listing_a_folder_that_is_not_there_is_refused_rather_than_answered_empty' --test commands
 
@@ -346,7 +346,7 @@ case_ "a name the validator refuses says so instead of offering a control" \
 # whose every `relativePath` `exclude_subfolder` will refuse.
 case_ "a relative_path that cannot be a rule is refused before any row is built" \
   src-tauri/src/tree.rs \
-  's~    WalkRules::check_prefix\(&relative_path\)\?;~    /* mutant: the asked-for path is not validated */~' \
+  's~        WalkRules::check_prefix\(&relative_path\)\?;~        /* mutant: the asked-for path is not validated */~' \
   '/* mutant: the asked-for path is not validated */' \
   mnema-desktop 'a_relative_path_that_cannot_be_a_rule_is_refused_with_the_validators_sentence' --test commands
 
@@ -418,3 +418,22 @@ case_ "a name deleted from BUILTIN_DIRS is caught by the hand-pinned list" \
   's~        "\.hg",\n~        /* mutant: .hg dropped from the built-in list */\n~' \
   '/* mutant: .hg dropped from the built-in list */' \
   mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
+
+# ---------------------------------------------------------------------------
+# `.gitignore` below a folder, and the root's mark (PR #104)
+# ---------------------------------------------------------------------------
+
+# A collapsed folder that holds a gitignored row says nothing, so its tick
+# changes from ✓ to – when it is opened — the defect PR #104 removed.
+case_ "a folder says .gitignore holds a row below it before it is opened" \
+  src-tauri/src/tree.rs \
+  's~fn holds_gitignored\(root: &Path, rules: &LevelRules<._>, relative: &str\) -> bool \{~fn holds_gitignored(root: \&Path, rules: \&LevelRules<'"'"'_>, relative: \&str) -> bool {\n    return false; /* mutant: nothing is held below */~' \
+  '/* mutant: nothing is held below */' \
+  mnema-desktop 'a_folder_says_gitignore_holds_something_below_it' --test commands
+
+# A shut root answers ✓ whatever its rules and `.gitignore` hold.
+case_ "a shut root's mark reads its rules and .gitignore" \
+  src-tauri/src/tree.rs \
+  's~    on_level\(&state, root_id, \|root, rules\| \{\n        Ok\(rules~    on_level(\&state, root_id, |root, rules| {\n        Ok(false /* mutant: every root is fully indexed */ \&\& rules~' \
+  '/* mutant: every root is fully indexed */' \
+  mnema-desktop 'root_mark_says_whether_anything_under_the_root_is_held' --test commands

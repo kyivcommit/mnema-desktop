@@ -416,7 +416,7 @@ pub struct StoredExclusion {
 ///    was one site when this list was written and the sentence said so; a
 ///    reader who trusted the count rather than the file would have missed
 ///    the second.
-fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
+pub(crate) fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
     let mut current = root.to_path_buf();
     for component in prefix.split('/') {
         match std::fs::read_dir(&current).and_then(|entries| entry_named(entries, component)) {

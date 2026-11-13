@@ -86,6 +86,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::cancel_job,
         bridge::job_status,
         tree::list_subfolders,
+        tree::root_mark,
         ticks::set_tick,
         ticks::preview_tick,
         tree::list_tree,

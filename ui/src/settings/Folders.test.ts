@@ -25,6 +25,7 @@ const confirmWatchedFolder = vi.fn();
 // `ipc.test.ts` owns the argument names each of these sends.
 const listSubfolders = vi.fn();
 const listExclusions = vi.fn();
+const rootMark = vi.fn();
 const excludeSubfolder = vi.fn();
 const includeSubfolder = vi.fn();
 const setTick = vi.fn();
@@ -40,6 +41,7 @@ vi.mock('../lib/ipc', async (real) => ({
   confirmWatchedFolder: (...a: unknown[]) => confirmWatchedFolder(...a),
   listSubfolders: (...a: unknown[]) => listSubfolders(...a),
   listExclusions: (...a: unknown[]) => listExclusions(...a),
+  rootMark: (...a: unknown[]) => rootMark(...a),
   excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
   includeSubfolder: (...a: unknown[]) => includeSubfolder(...a),
   setTick: (...a: unknown[]) => setTick(...a),
@@ -100,6 +102,8 @@ beforeEach(() => {
   open.mockReset();
   listSubfolders.mockReset();
   listExclusions.mockReset();
+  rootMark.mockReset();
+  rootMark.mockResolvedValue(false);
   // Selecting a root opens it (spec), so every test that presses «Remove» also
   // reads a listing; an empty one unless the test says otherwise.
   listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
@@ -519,7 +523,7 @@ test('a language switch reaches the empty-state sentence too', async () => {
 function sub(name: string, state: SubfolderState = { kind: 'open' }, parent = ''): Subfolder {
   return {
     name, relativePath: parent ? `${parent}/${name}` : name, isDir: true, state,
-    failure: null, failedBelow: 0,
+    failure: null, failedBelow: 0, gitignoredBelow: false,
   };
 }
 // A FILE row (folders tree PR 2): no chevron, a tick, and its own marks.
@@ -3401,12 +3405,65 @@ test('with nothing selected, a re-read selects the first unconfirmed folder and 
   await waitFor(() => expect(screen.getByTestId('folder-panel-3')).toBeTruthy());
 });
 
-test('the root mark is blank until its rules are read, then ✓ or –, and stays when shut', async () => {
+// Owner, 2026-11-13: the mark is there when the window opens — asked of the
+// shell for every root — and blank only where that question failed.
+test('every root is marked ✓ or – before any panel is opened, and blank when the shell cannot say', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+    root({ rootId: 3, absolutePath: '/synthetic/gone' }),
+  ]));
+  rootMark.mockImplementation((rootId: number) =>
+    rootId === 3 ? Promise.reject(new Error('unmounted')) : Promise.resolve(rootId === 1));
+  render(Folders, { props: { jobs: createJobController() } });
+  const mark = (id: number) => screen.getByTestId(`folder-root-mark-${id}`);
+  await waitFor(() => expect(mark(1).textContent).toBe('–'));
+  await waitFor(() => expect(mark(2).textContent).toBe('✓'));
+  expect(mark(3).textContent).toBe('');
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+  expect(listSubfolders).not.toHaveBeenCalled();
+});
+
+// PR #104 review: a root whose panel opens in the same read is not walked by
+// the shell twice — its panel's read gives the mark.
+test('a root opened by the window itself is not asked for its mark', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/waiting', confirmed: false }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByTestId('folder-panel-1')).toBeTruthy());
+  await waitFor(() => expect(rootMark).toHaveBeenCalledWith(2));
+  expect(rootMark).not.toHaveBeenCalledWith(1);
+});
+
+test('a mark the shell gives after a panel read started is not drawn over the panel\'s', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  let answer: (some: boolean) => void = () => {};
+  rootMark.mockImplementation(() => new Promise<boolean>((resolve) => { answer = resolve; }));
+  listExclusions.mockResolvedValue([{ prefix: 'Work', existsOnDisk: true }]);
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(rootMark).toHaveBeenCalledWith(1));
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  const mark = screen.getByTestId('folder-root-mark-1');
+  await waitFor(() => expect(mark.textContent).toBe('–'));
+
+  answer(false);
+  await tick_();
+  await Promise.resolve();
+  expect(mark.textContent).toBe('–');
+});
+
+test('the root mark follows its rules once they are read, then ✓ or –, and stays when shut', async () => {
   setLocale('en');
   listTree.mockResolvedValue(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root' }),
     root({ rootId: 2, absolutePath: '/synthetic/other' }),
   ]));
+  rootMark.mockImplementation(() => new Promise<boolean>(() => {})); // never answers
   listExclusions.mockImplementation((rootId: number) => Promise.resolve(
     rootId === 1 ? [{ prefix: 'Work', existsOnDisk: true }] : [{ prefix: 'Gone', existsOnDisk: false }],
   ));
@@ -3749,21 +3806,24 @@ test('an included row is ticked and tagged gitignore · included only on its own
 
 // Owner's ruling 2026-11-12 (after PR #102): what `.gitignore` names is as if
 // the person had unticked it, so its folder shows `–` like for an exclusion —
-// and the `–` click asks to tick everything inside, as for a rule.
-test('a folder whose loaded child is gitignored shows the mixed tick and its click ticks everything', async () => {
+// and the `–` click asks to tick everything inside, as for a rule. Owner,
+// 2026-11-13: collapsed too — the shell's `gitignoredBelow` says it, and the
+// root is `–` before anything is opened.
+test('a folder with a gitignored row below shows the mixed tick collapsed and open, and its click ticks everything', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listSubfolders.mockImplementation((_rootId: number, path: string) =>
     Promise.resolve(path === ''
-      ? subfolders([sub('a')])
+      ? subfolders([{ ...sub('a'), gitignoredBelow: true }, sub('b')])
       : subfolders([fileRow('.env', { kind: 'gitIgnored', by: 'a/.env' }, 'a'), fileRow('y.txt', { kind: 'open' }, 'a')])));
   listExclusions.mockResolvedValue([]);
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   const collapsed = await screen.findByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
-  // Collapsed: nothing loaded says so — a walk per row would be the cost.
-  expect(collapsed.indeterminate).toBe(false);
+  expect(collapsed.indeterminate).toBe(true);
+  expect((screen.getByRole('checkbox', { name: 'Index b' }) as HTMLInputElement).indeterminate).toBe(false);
+  await waitFor(() => expect(screen.getByTestId('folder-root-mark-1').textContent).toBe('–'));
   await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
   await waitFor(() => expect(screen.getByTestId('subfolder-1-a/.env')).toBeTruthy());
 
@@ -4022,8 +4082,8 @@ test('the popup keeps the keyboard: Tab wraps, focus outside returns, Esc anywhe
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
-// PR #103 review 3: the root and a folder read `.gitignore` off every LOADED
-// level, not only the one right under them, so the root never says
+// PR #103 review 3: the root and a folder read `.gitignore` off every level
+// (since 2026-11-13 from the shell's `gitignoredBelow`), so the root never says
 // "Everything is indexed" over a `–` it can see — and a held-but-open folder
 // one level down makes its parent `–` too.
 test('a gitignored row deep in an open folder makes the folder and the root mixed', async () => {
@@ -4031,7 +4091,7 @@ test('a gitignored row deep in an open folder makes the folder and the root mixe
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listExclusions.mockResolvedValue([]);
   listSubfolders.mockImplementation((_rootId: number, path: string) => Promise.resolve(subfolders(
-    path === '' ? [sub('sub'), sub('other')]
+    path === '' ? [{ ...sub('sub'), gitignoredBelow: true }, sub('other')]
     : path === 'sub' ? [sub('keep', undefined, 'sub'), sub('vendor', { kind: 'gitIgnoredOpen', by: 'sub/vendor' }, 'sub')]
     : [],
   )));

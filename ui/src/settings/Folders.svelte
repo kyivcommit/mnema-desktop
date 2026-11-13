@@ -5,7 +5,7 @@
   import { locale, t } from '../i18n';
   import {
     listTree, addWatchedFolder, removeWatchedFolder, confirmWatchedFolder,
-    listSubfolders, listExclusions, setTick, previewTick,
+    listSubfolders, listExclusions, rootMark, setTick, previewTick,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
@@ -248,12 +248,12 @@
     return e instanceof Error ? e.message : String(e);
   }
 
-  // Whether a LOADED level at or under `tree` holds a row `.gitignore` names —
-  // as if the person had unticked it (owner's ruling 2026-11-12). A collapsed
-  // folder cannot know without a walk per row, so unloaded levels say nothing.
-  function holdsGitignored(tree: SubTree): boolean {
-    return tree.listing.entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen')
-      || Object.values(tree.children).some(holdsGitignored);
+  // Whether `.gitignore` holds a row of this level or under it — as if the
+  // person had unticked it (owner's ruling 2026-11-12). The shell walks the
+  // subtree for `gitignoredBelow`, so a collapsed folder knows it too (owner,
+  // 2026-11-13: the tick must not change when the folder is opened).
+  function holdsGitignored(entries: Subfolder[]): boolean {
+    return entries.some((e) => e.state.kind === 'gitIgnored' || e.state.kind === 'gitIgnoredOpen' || e.gitignoredBelow);
   }
 
   function patch(rootId: number, fields: Partial<Panel>) {
@@ -265,9 +265,25 @@
       // A row `.gitignore` names counts as unticked (owner's ruling
       // 2026-11-12), on any loaded level, as for a folder's mixed box.
       const some = next.rules.some((r) => r.existsOnDisk)
-        || (next.tree !== null && holdsGitignored(next.tree));
+        || (next.tree !== null && holdsGitignored(next.tree.listing.entries));
       marks = { ...marks, [rootId]: { path: panel.rootPath, some } };
     }
+  }
+
+  // The mark of a shut root, asked of the shell. A panel read that starts while
+  // this is on the wire bumps `generations` and answers itself, so this reply
+  // is dropped; a failure leaves no mark rather than a `✓` that could be false.
+  async function readMark(root: TreeRoot) {
+    const generation = generations[root.rootId] ?? 0;
+    let some: boolean;
+    try {
+      some = await rootMark(root.rootId);
+    } catch {
+      return;
+    }
+    if ((generations[root.rootId] ?? 0) !== generation) return;
+    if (!roots.some((r) => r.rootId === root.rootId && r.absolutePath === root.absolutePath)) return;
+    marks = { ...marks, [root.rootId]: { path: root.absolutePath, some } };
   }
 
   // A click on a root selects it for `−` and opens it; it never shuts it.
@@ -904,6 +920,13 @@
       const waiting = listing.roots.find((r) => !r.confirmed);
       if (waiting !== undefined) selectRoot(waiting);
     }
+    // Owner, 2026-11-13: every root's ✓ or – is there when the window opens,
+    // not only after its panel has been read once. After `selectRoot`, and not
+    // for an open panel: its own read gives the mark, and would drop this
+    // reply after the shell had walked the whole root for nothing.
+    for (const root of listing.roots) {
+      if (panels[root.rootId] === undefined) void readMark(root);
+    }
   }
 
   // ── PR 8a, Task 8. Live run, finding 1: what a finished scan leaves behind ─
@@ -1459,8 +1482,8 @@
           heldBelow(rules, entry.relativePath)
           || entry.state.kind === 'gitIgnoredOpen'
           // What `.gitignore` names is as if the person had unticked it, so
-          // its folder is `–`, as for a rule (`holdsGitignored`).
-          || (child !== undefined && holdsGitignored(child))
+          // its folder is `–`, as for a rule — opened or not.
+          || entry.gitignoredBelow
         ),
         tag: control === 'none' ? sentence : gitTag(entry),
         mark:

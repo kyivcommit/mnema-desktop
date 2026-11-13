@@ -349,7 +349,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         held !== undefined ? { kind: 'excludedByAncestor', prefix: held }
         : rules.includes(path) ? { kind: 'excluded' } : git(path) ?? { kind: 'open' };
       const row = (name: string, isDir: boolean, extra: Record<string, unknown> = {}) => ({
-        name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, ...extra,
+        name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, gitignoredBelow: false, ...extra,
       });
       const entries = dir === ''
         ? [
@@ -370,6 +370,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
           ];
       return { entries, unnameable: 0 };
     },
+    // `build` at the top is what `.gitignore` holds in this bench, unless ticked back whole.
+    root_mark: (a) => (s.exclusions.get(a.rootId as number) ?? []).length > 0
+      || !(s.includes.get(a.rootId as number) ?? []).includes('build'),
     list_exclusions: (a) => (s.exclusions.get(a.rootId as number) ?? []).map((prefix) => ({ prefix, existsOnDisk: true })),
     exclude_subfolder: (a) => {
       const id = a.rootId as number;

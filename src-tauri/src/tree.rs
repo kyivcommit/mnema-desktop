@@ -1073,6 +1073,11 @@ pub struct Subfolder {
     /// For a folder: how many files strictly under it carry a shown failure,
     /// so a collapsed level does not hide one. `0` for a file.
     pub failed_below: u64,
+    /// For a walked folder: `.gitignore` holds a row strictly under it that no
+    /// include lifts — as if the person had unticked it (owner, 2026-11-12) —
+    /// so a collapsed folder's tick is `–` too. Filled by `list_subfolders`
+    /// only; `false` for a file.
+    pub gitignored_below: bool,
 }
 
 /// One whole-file verdict from the `skipped` table, as the tree shows it: the
@@ -1660,6 +1665,7 @@ pub(crate) fn read_subfolders(
             state,
             failure,
             failed_below,
+            gitignored_below: false,
         });
     }
     listed.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1696,6 +1702,54 @@ pub fn list_subfolders(
     root_id: i64,
     relative_path: String,
 ) -> Result<SubfolderListing, Error> {
+    on_level(&state, root_id, |root, rules| {
+        let dir = subfolder_dir(root, root_id, &relative_path)?;
+        // After containment, never before: `..` and an absolute path are refused
+        // by the rule above with a sentence about where they resolve, which is the
+        // more specific answer and the one three tests assert. What is left for
+        // this to catch is a path that stays inside the root and still cannot be a
+        // rule — `a/.`, `a//b`, a component with a backslash — and it is refused
+        // with `WalkRules`'s own sentence, the same one `exclude_subfolder` would
+        // give, because every `relativePath` this call would emit has this path as
+        // its ancestor and would inherit the refusal.
+        WalkRules::check_prefix(&relative_path)?;
+        let mut listing = read_level(&dir, root_id, &relative_path, rules)?;
+        for entry in &mut listing.entries {
+            if entry.is_dir
+                && matches!(
+                    entry.state,
+                    SubfolderState::Open | SubfolderState::UnusableName
+                )
+            {
+                entry.gitignored_below = holds_gitignored(root, rules, &entry.relative_path);
+            }
+        }
+        Ok(listing)
+    })
+}
+
+/// Whether the root's tick is `–`: a rule of the person's whose path is still
+/// on disk, or a row `.gitignore` holds anywhere a scan walks — the same two
+/// facts the settings tree reads off an open panel, answered for a shut one
+/// so the mark is there when the window opens (owner, 2026-11-13).
+#[tauri::command(async)]
+pub fn root_mark(state: State<'_, AppState>, root_id: i64) -> Result<bool, Error> {
+    on_level(&state, root_id, |root, rules| {
+        Ok(rules
+            .prefixes
+            .iter()
+            .any(|prefix| crate::bridge::prefix_exists_on_disk(root, prefix))
+            || holds_gitignored(root, rules, ""))
+    })
+}
+
+/// The root and the rules its rows are decided by — what [`list_subfolders`]
+/// and [`root_mark`] both ask, so the two cannot read different rules.
+fn on_level<R>(
+    state: &AppState,
+    root_id: i64,
+    f: impl FnOnce(&Path, &LevelRules<'_>) -> Result<R, Error>,
+) -> Result<R, Error> {
     let root = state
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
@@ -1710,16 +1764,6 @@ pub fn list_subfolders(
     let root_canonical = root_path
         .canonicalize()
         .map_err(|_| Error::RootUnavailable(root_id))?;
-    let dir = subfolder_dir(&root_canonical, root_id, &relative_path)?;
-    // After containment, never before: `..` and an absolute path are refused
-    // by the rule above with a sentence about where they resolve, which is the
-    // more specific answer and the one three tests assert. What is left for
-    // this to catch is a path that stays inside the root and still cannot be a
-    // rule — `a/.`, `a//b`, a component with a backslash — and it is refused
-    // with `WalkRules`'s own sentence, the same one `exclude_subfolder` would
-    // give, because every `relativePath` this call would emit has this path as
-    // its ancestor and would inherit the refusal.
-    WalkRules::check_prefix(&relative_path)?;
     let (prefixes, mask_names, skips, includes) = state.with_index(|db| {
         Ok::<_, mnema_index::Error>((
             db.list_path_exclusions(root_id)?,
@@ -1749,7 +1793,40 @@ pub fn list_subfolders(
         &skips,
         &git,
     );
-    read_level(&dir, root_id, &relative_path, &rules)
+    f(&root_canonical, &rules)
+}
+
+/// Whether `.gitignore` holds a row strictly under the walked folder
+/// `relative`, by the same per-row states the listing draws, so a collapsed
+/// folder agrees with what opening it would show. Enters only folders the walk
+/// enters (`Open`, `UnusableName`) and stops at the first held row. A folder it
+/// cannot read says nothing: opening it would refuse, not show a held row.
+// shortcut: re-walks the subtree on every expand (~0.1 s for 31k entries);
+// cache per root if a root grows past ~1M entries.
+fn holds_gitignored(root: &Path, rules: &LevelRules<'_>, relative: &str) -> bool {
+    let Ok(read) = std::fs::read_dir(root.join(relative)) else {
+        return false;
+    };
+    let Ok(entries) = directory_entries(read) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        let Some(name) = entry.name.to_str() else {
+            return false;
+        };
+        let path = if relative.is_empty() {
+            name.to_string()
+        } else {
+            format!("{relative}/{name}")
+        };
+        match subfolder_state(rules, &path, entry) {
+            SubfolderState::GitIgnored { .. } | SubfolderState::GitIgnoredOpen { .. } => true,
+            SubfolderState::Open | SubfolderState::UnusableName => {
+                entry.is_dir && holds_gitignored(root, rules, &path)
+            }
+            _ => false,
+        }
+    })
 }
 
 /// One level of the disk at `dir` (already resolved by [`subfolder_dir`]),
@@ -1912,6 +1989,7 @@ mod tests {
             state,
             failure: None,
             failed_below: 0,
+            gitignored_below: false,
         };
         SubfolderListing {
             entries: vec![
@@ -1942,6 +2020,7 @@ mod tests {
                         reason: "took too long".to_string(),
                     }),
                     failed_below: 4,
+                    gitignored_below: false,
                     ..row("slow", SubfolderState::Open)
                 },
                 row(
