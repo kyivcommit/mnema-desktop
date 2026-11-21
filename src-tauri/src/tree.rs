@@ -35,8 +35,9 @@ pub struct TreeRoot {
     /// reads it until then, and the launcher marks it.
     pub confirmed: bool,
     pub files: Vec<TreeFile>,
-    /// The root's folder search entries, by folder path ascending; a folder
-    /// with no entry follows its nearest entered ancestor (the spec's §3).
+    /// The root's search entries, by path ascending; a folder or file with no
+    /// entry follows its nearest entered ancestor (the spec's §3). An entry's
+    /// `folder_path` may name a single file, as in `Db::set_folder_searched`.
     pub searched: Vec<SearchedFolder>,
     /// How many files under this root the last scans could not read, counted
     /// the way the folders tree marks them ([`shown_failure`]) — the `⚠ N`
@@ -146,8 +147,9 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
-/// Turns one folder's search on or off for its whole subtree: the entries
-/// below it are cleared and its own is written, in one transaction
+/// Turns one folder's search on or off for its whole subtree — or one file's,
+/// when `folder_path` names a file: the entries below it are cleared, its own
+/// is written and the choice folds back up, in one transaction
 /// (`Db::set_folder_searched`). Off the main thread, like [`list_tree`].
 #[tauri::command(async)]
 pub fn set_folder_searched(

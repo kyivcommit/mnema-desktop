@@ -83,6 +83,7 @@ export type AskAnswer =
 export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentArmReport };
 
 export type TreeFile = { relativePath: string; documentId: string };
+// `folderPath` may name a single file: a file's own tick (D177, `Db::set_folder_searched`).
 export type SearchedFolder = { folderPath: string; searched: boolean };
 // `confirmed`: D202 — false while a folder added through the window waits for
 // the person's Start; no scan reads it until then.

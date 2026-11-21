@@ -1000,6 +1000,12 @@ jobs:
             "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-aarch64-apple-darwin.zip"
           echo "${TAURI_CLI_SHA256}  $RUNNER_TEMP/cargo-tauri.zip" | shasum -a 256 -c -
           bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # Image macos-26-arm64 20261102.0473.1 ships rustup from a system
+          # package (self-update disabled), with no `~/.cargo/bin` and nothing
+          # of it on PATH: unzip failed "cannot create extraction directory".
+          mkdir -p "$bin"
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
           unzip -o -q "$RUNNER_TEMP/cargo-tauri.zip" cargo-tauri -d "$bin"
           chmod +x "$bin/cargo-tauri"
           cargo tauri --version | tee /dev/stderr | grep -qx "tauri-cli ${TAURI_CLI_VERSION}"

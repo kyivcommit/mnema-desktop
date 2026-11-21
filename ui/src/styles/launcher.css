@@ -163,6 +163,8 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* Row: chevron, search check, icon, name. The check is not inside the
    disclosure button, so it sits over the button's empty slot. */
 .tree .folder-row { position: relative; }
+/* A file's own search check sits over its slot the same way; its li holds only the row. */
+.tree li:has(> .file-row) { position: relative; }
 .tree .folder-row > button, .tree li > button.file-row {
   display: flex; align-items: center; gap: 4px;
 }

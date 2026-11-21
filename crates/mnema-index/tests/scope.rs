@@ -528,3 +528,129 @@ fn a_pathless_indexed_document_counts_as_searchable() {
     db.set_folder_searched(root, "", false).unwrap();
     assert!(db.any_document_searchable().unwrap());
 }
+
+#[test]
+fn an_unticked_file_is_hidden_and_its_sibling_is_not() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
+fn a_ticked_file_under_an_unticked_folder_is_found() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    db.set_folder_searched(root, "", false).unwrap();
+    db.set_folder_searched(root, "notes/a.md", true).unwrap();
+    assert_found(&db, space, &c, &[0]);
+}
+
+#[test]
+fn a_file_entry_names_one_path() {
+    let (db, root, space, c) = index(&["a.md", "a.md.bak"]);
+    db.set_folder_searched(root, "a.md", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
+fn a_folder_click_clears_a_file_entry() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    db.set_folder_searched(root, "notes", true).unwrap();
+    assert_found(&db, space, &c, &[0, 1]);
+    // The file entry is gone, and with every file on the fold leaves no entry.
+    assert_eq!(db.search_folders(root).unwrap(), vec![]);
+}
+
+// --- fold-back: a folder whose every indexed file carries the same choice ---
+
+/// Seeds one more indexed file after the choices were made — what a scan
+/// brings in later — and returns its chunk id.
+fn arrive(db: &Db, root: i64, space: i64, n: u32, rel: &str) -> i64 {
+    let c = seed(db, root, n, rel, "zebra");
+    db.insert_vector(space, c, &unit_vector_1024()).unwrap();
+    c
+}
+
+#[test]
+fn unticking_every_file_one_by_one_folds_into_the_folder() {
+    let (db, root, space, mut c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    db.set_folder_searched(root, "notes/b.md", false).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![("notes".to_string(), false)]
+    );
+    c.push(arrive(&db, root, space, 9, "notes/c.md"));
+    assert_found(&db, space, &c, &[2]);
+}
+
+#[test]
+fn ticking_every_file_back_under_an_unticked_folder_folds_to_on() {
+    let (db, root, space, mut c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    db.set_folder_searched(root, "notes", false).unwrap();
+    db.set_folder_searched(root, "notes/a.md", true).unwrap();
+    db.set_folder_searched(root, "notes/b.md", true).unwrap();
+    // Everything is on again, which is what no entry means.
+    assert_eq!(db.search_folders(root).unwrap(), vec![]);
+    c.push(arrive(&db, root, space, 9, "notes/c.md"));
+    assert_found(&db, space, &c, &[0, 1, 2, 3]);
+}
+
+#[test]
+fn the_fold_climbs_to_the_root() {
+    let (db, root, space, mut c) = index(&["a/x.md", "b/y.md"]);
+    db.set_folder_searched(root, "a/x.md", false).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![("a".to_string(), false)]
+    );
+    db.set_folder_searched(root, "b/y.md", false).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![(String::new(), false)]
+    );
+    c.push(arrive(&db, root, space, 9, "new/z.md"));
+    assert_found(&db, space, &c, &[]);
+}
+
+#[test]
+fn a_mixed_folder_does_not_fold() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![("notes/a.md".to_string(), false)]
+    );
+    assert_found(&db, space, &c, &[1, 2]);
+}
+
+#[test]
+fn a_file_not_yet_indexed_does_not_hold_the_fold_back() {
+    let (db, root, _space, _c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    let pending = format!("{:064}", 77);
+    db.insert_document(&pending, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    add_path(&db, root, &pending, "notes/p.md");
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    db.set_folder_searched(root, "notes/b.md", false).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![("notes".to_string(), false)]
+    );
+}
+
+#[test]
+fn ticking_every_file_of_a_folder_under_an_unticked_root_folds_to_an_on_entry() {
+    let (db, root, space, mut c) = index(&["notes/a.md", "notes/b.md", "other/c.md"]);
+    db.set_folder_searched(root, "", false).unwrap();
+    db.set_folder_searched(root, "notes/a.md", true).unwrap();
+    db.set_folder_searched(root, "notes/b.md", true).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![(String::new(), false), ("notes".to_string(), true)]
+    );
+    assert_found(&db, space, &c, &[0, 1]);
+    // The folder entry, not two file entries, is what lets a new file in.
+    c.push(arrive(&db, root, space, 9, "notes/d.md"));
+    assert_found(&db, space, &c, &[0, 1, 3]);
+}
