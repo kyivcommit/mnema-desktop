@@ -387,15 +387,18 @@
     }
   }
 
-  function folderPaths(nodes: TreeNode[], out: string[] = []): string[] {
-    for (const n of nodes) if (n.kind === 'folder') { out.push(n.path); folderPaths(n.children, out); }
+  function filePaths(nodes: TreeNode[], out: string[] = []): string[] {
+    for (const n of nodes) if (n.kind === 'file') out.push(n.path); else filePaths(n.children, out);
     return out;
   }
 
-  // ✓ when the folder and every folder under it are searched, empty when none
-  // are, — otherwise.
+  // Read from the files: they are what search finds. A folder whose files all
+  // carry their own "off" is off, whatever its own entry says. ✓ when every
+  // file under it is searched, empty when none is, — otherwise. A file, or a
+  // root with no files yet, reads its own flag.
   function checkState(rootId: number, path: string, children: TreeNode[]): 'on' | 'off' | 'mixed' {
-    const flags = [path, ...folderPaths(children)].map((p) => ownOn(rootId, p));
+    const files = filePaths(children);
+    const flags = (files.length > 0 ? files : [path]).map((p) => ownOn(rootId, p));
     return flags.every(Boolean) ? 'on' : flags.some(Boolean) ? 'mixed' : 'off';
   }
 
@@ -591,11 +594,12 @@
           <button
             type="button"
             class="file-row"
-            class:unsearched={!ownOn(rootId, parentOf(node.path))}
+            class:unsearched={!ownOn(rootId, node.path)}
             data-testid={`tree-file-${node.documentId}`}
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
             onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId, ...focusOf(node.documentId) })}
-            >{@render fileIcon()}<span class="label">{node.name}</span></button>
+            ><span class="check-slot"></span>{@render fileIcon()}<span class="label">{node.name}</span></button>
+          {@render check(rootId, node.path, node.name, [])}
         {/if}
       </li>
     {/each}

@@ -241,7 +241,8 @@ test('the controls are exactly the ones with a real action', async () => {
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   expect(controls()).toEqual([
     'tree-root-toggle-1', 'tree-check-1-',
-    'tree-folder-notes', 'tree-check-1-notes', 'tree-file-doc-1', 'tree-file-doc-2',
+    'tree-folder-notes', 'tree-check-1-notes',
+    'tree-file-doc-1', 'tree-check-1-notes/a.md', 'tree-file-doc-2', 'tree-check-1-notes/b.md',
     'tree-folder-archive', 'tree-check-1-archive',
   ]);
 });
@@ -1556,4 +1557,96 @@ test('an unconfirmed root is marked, has no search check, and opens Settings on 
   expect(opens).toHaveLength(1);
   expect(opens[0][1]).toEqual({ section: 'folders' });
   expect(pending.getAttribute('aria-expanded')).not.toBe('true');
+});
+
+// --- a search tick on each file (D177 extended to files) ----------------------
+
+async function mountOpenNotes(listing: TreeListing = oneRootTwoFolders) {
+  mockTree(listing);
+  const onScope = vi.fn();
+  render(Tree, { selected: null, onPick: pick, onScopeChange: onScope });
+  const folder = await screen.findByTestId('tree-folder-notes');
+  if (folder.getAttribute('aria-expanded') !== 'true') await fireEvent.click(folder);
+  return onScope;
+}
+
+test('a file row carries its own search tick', async () => {
+  await mountOpenNotes();
+  expect(box('notes/a.md').checked).toBe(true);
+  expect(box('notes/a.md').indeterminate).toBe(false);
+});
+
+test('unticking a file marks its folder and root mixed and only that row unsearched', async () => {
+  await mountOpenNotes();
+  await fireEvent.click(box('notes/a.md'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: 'notes/a.md', searched: false }]]);
+  expect(box('notes/a.md').checked).toBe(false);
+  expect(box('notes').checked).toBe(false);
+  expect(box('notes').indeterminate).toBe(true);
+  expect(box('').indeterminate).toBe(true);
+  expect(box('archive').checked).toBe(true);
+  expect(screen.getByTestId('tree-file-doc-1').classList.contains('unsearched')).toBe(true);
+  expect(screen.getByTestId('tree-file-doc-2').classList.contains('unsearched')).toBe(false);
+});
+
+test('a folder click after a file click ticks the file back', async () => {
+  await mountOpenNotes();
+  await fireEvent.click(box('notes/a.md'));
+  await fireEvent.click(box('notes'));
+  await waitFor(() => expect(setCalls()).toHaveLength(2));
+  expect(setCalls()[1][1]).toEqual({ rootId: 1, folderPath: 'notes', searched: true });
+  expect(box('notes/a.md').checked).toBe(true);
+  expect(box('notes').checked).toBe(true);
+  expect(box('notes').indeterminate).toBe(false);
+});
+
+test('a file entry in the listing unticks that file and marks its folder mixed', async () => {
+  await mountOpenNotes({ roots: [{ ...oneRootTwoFolders.roots[0], searched: [{ folderPath: 'notes/b.md', searched: false }] }] });
+  expect(box('notes/b.md').checked).toBe(false);
+  expect(box('notes/a.md').checked).toBe(true);
+  expect(box('notes').indeterminate).toBe(true);
+});
+
+test('a file ticked under an unticked folder makes the folder mixed', async () => {
+  await mountOpenNotes(withNotesOff);
+  expect(box('notes/a.md').checked).toBe(false);
+  await fireEvent.click(box('notes/a.md'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: 'notes/a.md', searched: true }]]);
+  expect(box('notes/a.md').checked).toBe(true);
+  expect(box('notes').indeterminate).toBe(true);
+  expect(screen.getByTestId('tree-file-doc-1').classList.contains('unsearched')).toBe(false);
+  expect(screen.getByTestId('tree-file-doc-2').classList.contains('unsearched')).toBe(true);
+});
+
+test('unticking every file of a root, one by one, reports all-off', async () => {
+  mockTree({ roots: [{ ...oneRootTwoFolders.roots[0], files: [
+    { relativePath: 'x.md', documentId: 'doc-x' },
+    { relativePath: 'y.md', documentId: 'doc-y' },
+  ] }] });
+  const onScope = vi.fn();
+  mountScope(onScope);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-x.md'));
+  expect(lastScope(onScope)).toBe(false);
+  await fireEvent.click(box('y.md'));
+  expect(lastScope(onScope)).toBe(true);
+});
+
+test("under the filter a folder's check counts its hidden unticked file", async () => {
+  await mountLib({ roots: [{ ...LIB.roots[0], searched: [{ folderPath: 'Books/command/other.pdf', searched: false }], files: [
+    ...LIB.roots[0].files, { relativePath: 'Books/command/other.pdf', documentId: 'doc-o' },
+  ] }] });
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+  expect(screen.queryByTestId('tree-file-doc-o')).toBeNull();
+  expect(check('tree-check-1-Books/command').indeterminate).toBe(true);
+  expect(check('tree-check-1-Books/command').checked).toBe(false);
+});
+
+test('a folder whose every file is unticked reads empty, not mixed', async () => {
+  await mountOpenNotes();
+  await fireEvent.click(box('notes/a.md'));
+  await fireEvent.click(box('notes/b.md'));
+  expect(box('notes').checked).toBe(false);
+  expect(box('notes').indeterminate).toBe(false);
+  expect(box('').indeterminate).toBe(true);
 });
