@@ -638,3 +638,19 @@ fn a_file_not_yet_indexed_does_not_hold_the_fold_back() {
         vec![("notes".to_string(), false)]
     );
 }
+
+#[test]
+fn ticking_every_file_of_a_folder_under_an_unticked_root_folds_to_an_on_entry() {
+    let (db, root, space, mut c) = index(&["notes/a.md", "notes/b.md", "other/c.md"]);
+    db.set_folder_searched(root, "", false).unwrap();
+    db.set_folder_searched(root, "notes/a.md", true).unwrap();
+    db.set_folder_searched(root, "notes/b.md", true).unwrap();
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![(String::new(), false), ("notes".to_string(), true)]
+    );
+    assert_found(&db, space, &c, &[0, 1]);
+    // The folder entry, not two file entries, is what lets a new file in.
+    c.push(arrive(&db, root, space, 9, "notes/d.md"));
+    assert_found(&db, space, &c, &[0, 1, 3]);
+}

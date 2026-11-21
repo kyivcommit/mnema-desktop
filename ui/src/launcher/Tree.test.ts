@@ -1650,3 +1650,18 @@ test('a folder whose every file is unticked reads empty, not mixed', async () =>
   expect(box('notes').indeterminate).toBe(false);
   expect(box('').indeterminate).toBe(true);
 });
+
+test('two files of one name in different folders have different check names', async () => {
+  mockTree({ roots: [{ ...oneRootTwoFolders.roots[0], files: [
+    { relativePath: 'a/x.md', documentId: 'doc-ax' },
+    { relativePath: 'b/x.md', documentId: 'doc-bx' },
+  ] }] });
+  render(Tree, { selected: null, onPick: pick });
+  await fireEvent.click(await screen.findByTestId('tree-folder-a'));
+  await fireEvent.click(screen.getByTestId('tree-folder-b'));
+  const a = box('a/x.md').getAttribute('aria-label');
+  const b = box('b/x.md').getAttribute('aria-label');
+  expect(a).toContain('a/x.md');
+  expect(b).toContain('b/x.md');
+  expect(a).not.toBe(b);
+});

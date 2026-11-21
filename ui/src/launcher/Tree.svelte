@@ -599,7 +599,8 @@
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
             onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId, ...focusOf(node.documentId) })}
             ><span class="check-slot"></span>{@render fileIcon()}<span class="label">{node.name}</span></button>
-          {@render check(rootId, node.path, node.name, [])}
+          <!-- Labelled by path: two files of one name in different folders must not share a name. -->
+          {@render check(rootId, node.path, node.path, [])}
         {/if}
       </li>
     {/each}
