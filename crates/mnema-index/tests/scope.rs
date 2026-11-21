@@ -528,3 +528,37 @@ fn a_pathless_indexed_document_counts_as_searchable() {
     db.set_folder_searched(root, "", false).unwrap();
     assert!(db.any_document_searchable().unwrap());
 }
+
+#[test]
+fn an_unticked_file_is_hidden_and_its_sibling_is_not() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
+fn a_ticked_file_under_an_unticked_folder_is_found() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md", "top.md"]);
+    db.set_folder_searched(root, "", false).unwrap();
+    db.set_folder_searched(root, "notes/a.md", true).unwrap();
+    assert_found(&db, space, &c, &[0]);
+}
+
+#[test]
+fn a_file_entry_names_one_path() {
+    let (db, root, space, c) = index(&["a.md", "a.md.bak"]);
+    db.set_folder_searched(root, "a.md", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
+fn a_folder_click_clears_a_file_entry() {
+    let (db, root, space, c) = index(&["notes/a.md", "notes/b.md"]);
+    db.set_folder_searched(root, "notes/a.md", false).unwrap();
+    db.set_folder_searched(root, "notes", true).unwrap();
+    assert_found(&db, space, &c, &[0, 1]);
+    assert_eq!(
+        db.search_folders(root).unwrap(),
+        vec![("notes".to_string(), true)]
+    );
+}

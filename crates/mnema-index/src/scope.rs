@@ -5,7 +5,8 @@ use rusqlite::{Transaction, TransactionBehavior, params};
 use crate::{Db, Error};
 
 /// "This `path` row `pa` is searched" (spec §5): the nearest `search_folder`
-/// entry at or above its folder decides, no entry means searched. Written once
+/// entry decides — one naming the path itself (a single file's tick), else
+/// one at or above its folder — and no entry means searched. Written once
 /// for the two search arms and for `citation`'s choice of path. The prefix is
 /// compared with `substr`, never `LIKE`, so `_`/`%` are literal and `note`
 /// does not cover `notes/a.md`.
@@ -14,6 +15,7 @@ macro_rules! path_is_searched {
         "COALESCE((SELECT f.searched FROM search_folder f
                     WHERE f.watched_root_id = pa.watched_root_id
                       AND (f.folder_path = ''
+                           OR f.folder_path = pa.relative_path
                            OR substr(pa.relative_path, 1, length(f.folder_path) + 1)
                               = f.folder_path || '/')
                     ORDER BY length(f.folder_path) DESC
@@ -41,7 +43,8 @@ pub(crate) use {path_is_searched, searchable_document};
 
 impl Db {
     /// Records that `folder_path` (root-relative, `/`-separated, `""` = the
-    /// root) is searched or not, and forgets every entry beneath it: a choice
+    /// root; a file's own path names that one file) is searched or not, and
+    /// forgets every entry beneath it: a choice
     /// made on a folder covers its subtree, so older choices below it are stale.
     ///
     /// The prefix is compared with `substr`, never `LIKE`: `_` and `%` are
