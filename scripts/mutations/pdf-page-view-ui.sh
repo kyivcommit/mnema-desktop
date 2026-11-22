@@ -400,15 +400,15 @@ case_ "pane: the page mode does not say the passage is gone" \
 # F2. Anything is drawn as a page in the page mode.
 case_ "pane: a document that is not a PDF is drawn as a page" \
   $FP \
-  "s~\\{:else if mode === 'page' && view\\.mime === 'application/pdf'\\}~{:else if mode === 'page'}~" \
+  "s~\\{:else if mode === 'page' && PICTURE_PAGE_MIMES\\.has\\(view\\.mime\\)\\}~{:else if mode === 'page'}~" \
   "{:else if mode === 'page'}" \
   $PT 'the text mode draws no page, and neither does a document that is not a PDF' runner=vitest
 
 # F3. The page mode is drawn whatever the mode says.
 case_ "pane: the text mode draws the page" \
   $FP \
-  "s~\\{:else if mode === 'page' && view\\.mime === 'application/pdf'\\}~{:else if view.mime === 'application/pdf'}~" \
-  "{:else if view.mime === 'application/pdf'}" \
+  "s~\\{:else if mode === 'page' && PICTURE_PAGE_MIMES\\.has\\(view\\.mime\\)\\}~{:else if PICTURE_PAGE_MIMES.has(view.mime)}~" \
+  "{:else if PICTURE_PAGE_MIMES.has(view.mime)}" \
   $PT 'the text mode draws no page, and neither does a document that is not a PDF' runner=vitest
 
 # F4. The type of the document is never reported upward.
@@ -475,3 +475,27 @@ case_ "launcher: show-text on an unavailable page does nothing" \
   "s~onShowText=\\{\\(\\) => setPdfView\\('text'\\)\\}~onShowText={() => {}}~" \
   'onShowText={() => {}}' \
   $LT '"Show text" on an unavailable page switches the whole pane to the text' runner=vitest
+
+# ── Pictures drawn as their page (image OCR) ─────────────────────────────────
+
+# I1. One of the worker's picture mimes is missing from the set: that picture
+# opens as text, with no choice.
+case_ "picture: a PNG is not drawn as its page" \
+  $PP \
+  "s~'image/png', ~~" \
+  "'application/pdf', 'image/jpeg', 'image/tiff'" \
+  $LT 'every picture mime is drawn as its page, with the choice; the text is its text view' runner=vitest
+
+# I2. The pane draws only a PDF as its page; the launcher still offers the choice.
+case_ "picture: the pane draws only a PDF as its page" \
+  $FP \
+  "s~PICTURE_PAGE_MIMES\\.has\\(view\\.mime\\)~view.mime === 'application/pdf'~" \
+  "{:else if mode === 'page' && view.mime === 'application/pdf'}" \
+  $PT 'a picture of one page draws one page, shaped by the frame it answers' runner=vitest
+
+# I3. The launcher offers the choice for a PDF only; the pane still draws a picture.
+case_ "picture: the choice is not offered for a picture" \
+  $LA \
+  's~\Qnew Set([...PICTURE_PAGE_MIMES, ...DOC_PAGE_MIMES])\E~new Set(['"'"'application/pdf'"'"', ...DOC_PAGE_MIMES])~' \
+  "new Set(['application/pdf', ...DOC_PAGE_MIMES])" \
+  $LT 'every picture mime is drawn as its page, with the choice; the text is its text view' runner=vitest

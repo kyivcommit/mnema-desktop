@@ -111,21 +111,24 @@ test('an EPUB is offered the choice, and its page is the HTML view', () => drawn
 
 // Written out, not read from the set: the mimes the worker reports for a
 // picture (`typing.rs::image_mime`), each drawn as its page like a PDF.
-test.each(['image/jpeg', 'image/png', 'image/tiff', 'image/webp', 'image/heic'])(
-  'a picture (%s) is drawn as its page, with the choice; the text is its text view',
-  async (m) => {
+// One test, not `test.each`: the mutation harness checks case names literally.
+test('every picture mime is drawn as its page, with the choice; the text is its text view', async () => {
+  for (const m of ['image/jpeg', 'image/png', 'image/tiff', 'image/webp', 'image/heic']) {
     mime = m;
-    render(Launcher);
+    stubStorage();
+    invoke.mockClear();
+    const { unmount } = render(Launcher);
     await openFile();
-    await screen.findByTestId('page-image');
-    expect(pressed('page')).toBe('true');
-    expect(screen.queryByTestId('file-block')).toBeNull();
-    expect(invoke.mock.calls.some(([c]) => c === 'render_doc')).toBe(false);
+    expect(await screen.findByTestId('page-image', {}, { timeout: 500 }).catch(() => null), m).not.toBeNull();
+    expect(pressed('page'), m).toBe('true');
+    expect(screen.queryByTestId('file-block'), m).toBeNull();
+    expect(invoke.mock.calls.some(([c]) => c === 'render_doc'), m).toBe(false);
     await fireEvent.click(screen.getByTestId('pdf-view-text'));
-    expect(await screen.findByTestId('file-block')).toBeTruthy();
-    expect(screen.queryByTestId('page-image')).toBeNull();
-  },
-);
+    expect(await screen.findByTestId('file-block'), m).toBeTruthy();
+    expect(screen.queryByTestId('page-image'), m).toBeNull();
+    unmount();
+  }
+});
 
 test('the choice is not offered for anything but a PDF or Markdown', async () => {
   mime = 'text/plain';
