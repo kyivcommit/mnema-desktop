@@ -625,6 +625,11 @@ jobs:
     # warm target directory, 1m53s + 24s before, and the two new files 1m41s
     # (Rust) and 1m16s (vitest, compiles nothing).
     #
+    # `image-ocr` (pictures read for their text, 13 cases) joined the shortest leg of main run
+    # 44917489452, `pr7-default-models pr10f-tray-locale task-11 task-4` at 6m52s; measured
+    # locally with a warm target directory, 51 s. Its macOS half, `image-ocr-macos`, is
+    # not-in-matrix for the reason `scan-ocr-macos` is.
+    #
     # Each entry of `leg:` is the file names of one bucket, space-separated,
     # and the job's display name is that entry. Guard 5 reads every name of
     # every entry, and refuses a name written in two entries.
@@ -639,7 +644,7 @@ jobs:
           - embedding pr8-ui-folders task-5
           - model-config pr10e-settings task-3
           - wayland-shortcut branch-review refuse-by-content task-d61
-          - pr7-default-models pr10f-tray-locale task-11 task-4
+          - pr7-default-models pr10f-tray-locale task-11 task-4 image-ocr
           - pr8c-mask-differential pr9-ui task-10 task-7
           - pr8-exclusions citation-identity pdf-page-view pdf-page-view-ui
           - task-9 tree task-12 task-2 pr9-index pr8-subfolders-linux
