@@ -139,6 +139,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "std",
     "CFData",
     "CFNumber",
+    "CFString",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",

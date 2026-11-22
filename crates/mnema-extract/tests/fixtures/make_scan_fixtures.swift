@@ -236,8 +236,7 @@ func turnedCounterClockwise(_ image: CGImage) -> CGImage {
 }
 
 /// A picture with no text: a few soft shapes on a gradient, like a photo.
-func blankPhoto() -> CGImage {
-    let w = 1000, h = 750
+func blankPhoto(_ w: Int = 1000, _ h: Int = 750) -> CGImage {
     let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                         space: CGColorSpaceCreateDeviceRGB(),
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -285,6 +284,12 @@ writeImage("image-three-frames.tif", "public.tiff", [
     (card(sixPages[0], .gray), lzw),
     (blankPhoto(), lzw),
     (card(sixPages[2], .gray), lzw),
+])
+
+// An animated PNG: three frames of the same picture, which is what an
+// animation's frames are — the reader must count it as one page.
+writeImage("image-animated.png", "public.png", [
+    (blankPhoto(100, 75), [:]), (blankPhoto(100, 75), [:]), (blankPhoto(100, 75), [:]),
 ])
 
 // The magic an HEIF file shares with video: `ftyp` at offset 4. Only the brand

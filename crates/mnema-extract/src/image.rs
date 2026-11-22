@@ -115,9 +115,17 @@ mod platform {
         Ok(source)
     }
 
+    /// The formats whose frames are pages: a multi-page TIFF (a fax, a scan
+    /// batch) and an HEIF image sequence. Every other format's extra frames
+    /// are an animation — measured, an APNG of 50 frames is the same text 50
+    /// times — so it counts as its first frame only.
+    const PAGED_TYPES: [&str; 2] = ["public.tiff", "public.heics"];
+
     pub(super) fn count(source: &Source) -> usize {
-        // SAFETY: a plain getter on a source we own.
-        unsafe { source.0.count() }
+        // SAFETY: plain getters on a source we own.
+        let (frames, kind) = unsafe { (source.0.count(), source.0.r#type()) };
+        let paged = kind.is_some_and(|kind| PAGED_TYPES.contains(&kind.to_string().as_str()));
+        if paged { frames } else { frames.min(1) }
     }
 
     fn thumbnail_options() -> CFRetained<CFDictionary> {
@@ -158,6 +166,15 @@ mod platform {
     }
 
     pub(super) fn frame(source: &Source, index: usize) -> Result<OwnedPageImage, ImageError> {
+        // Against `count`, not ImageIO: an animation's later frames exist in
+        // the file but are not pages, and ImageIO refusing an index past its
+        // own end was measured on macOS 26-27 only.
+        if index >= count(source) {
+            return Err(ImageError::Malformed(format!(
+                "frame {index} of {}",
+                count(source)
+            )));
+        }
         // Per call, as in `ocr.rs`: a worker decodes many frames on one thread
         // whose outermost pool is never drained.
         autoreleasepool(|_| {

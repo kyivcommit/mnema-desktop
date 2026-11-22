@@ -56,6 +56,9 @@ mod macos {
     fn every_frame_of_every_fixture_is_bgra() {
         for name in [
             "image-uk.png",
+            "image-uk.jpg",
+            "image-uk.heic",
+            "image-uk.webp",
             "image-uk-gray.png",
             "image-uk-transparent.png",
             "image-uk-exif6.jpg",
@@ -101,6 +104,15 @@ mod macos {
             "{:?}",
             frames.frame(3).map(|f| (f.width, f.height))
         );
+    }
+
+    /// An animation is one page: its frames repeat the picture, not continue it.
+    #[test]
+    fn an_animated_png_is_its_first_frame_only() {
+        let frames = open("image-animated.png");
+        assert_eq!(frames.count(), 1);
+        assert!(frames.frame(0).is_ok());
+        assert!(matches!(frames.frame(1), Err(ImageError::Malformed(_))));
     }
 
     #[test]
