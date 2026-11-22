@@ -89,7 +89,7 @@ pub struct FileType {
 
 /// Public because the worker reads this many bytes to pick a size ceiling
 /// before it decides to read the rest (D189).
-pub const PDF_MAGIC: &[u8] = b"%PDF-";
+pub use mnema_core::wire::PDF_MAGIC;
 
 const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
 const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];

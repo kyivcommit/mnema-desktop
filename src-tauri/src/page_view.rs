@@ -14,12 +14,14 @@
 //! (or a path now names another document) the page is drawn alone and the
 //! window is told why.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
 use mnema_core::render::{
     RenderError, RenderRange, RenderRect, RenderReply, RenderRequest, TextMatch,
 };
+use mnema_core::wire::PDF_MAGIC;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
@@ -168,16 +170,25 @@ pub(crate) fn render_page_in(
     // Only "not found" is a missing file; a permission or I/O error on a file
     // that is there is a failure, and its cause goes to the log.
     match std::fs::metadata(&full) {
-        Ok(meta) if meta.len() > PoolConfig::new(worker).pdf_max_bytes => {
+        Ok(meta) => match ceiling_of(&full, &PoolConfig::new(worker)) {
             // The worker reads the whole file; ingest would refuse it too.
-            eprintln!(
-                "mnema: the page view refused {}: {} bytes, over the PDF ceiling",
-                full.display(),
-                meta.len()
-            );
-            return unavailable(PageUnavailable::Failed);
-        }
-        Ok(_) => {}
+            Ok(ceiling) if meta.len() > ceiling => {
+                eprintln!(
+                    "mnema: the page view refused {}: {} bytes, over its ceiling of {ceiling}",
+                    full.display(),
+                    meta.len()
+                );
+                return unavailable(PageUnavailable::Failed);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "mnema: the page view could not read {}: {e}",
+                    full.display()
+                );
+                return unavailable(PageUnavailable::Failed);
+            }
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return unavailable(PageUnavailable::FileMissing);
         }
@@ -284,6 +295,23 @@ pub(crate) fn warm_ocr_if_scanned(state: &AppState, worker: &Path, timeout: Dura
         Ok(()) => eprintln!("mnema: the OCR engine was warmed in {:?}", began.elapsed()),
         Err(e) => eprintln!("mnema: the OCR warm-up failed: {e}"),
     }
+}
+
+/// The ceiling ingest holds this file to (D189, decided as the worker decides
+/// it): the PDF one when the file starts as a PDF, `max_bytes` otherwise. The
+/// bytes on disk now decide, not what the index read there — a PDF replaced by
+/// a picture under the same path is held to the picture's ceiling. Only the
+/// magic is read.
+fn ceiling_of(path: &Path, config: &PoolConfig) -> std::io::Result<u64> {
+    let mut head = Vec::with_capacity(PDF_MAGIC.len());
+    std::fs::File::open(path)?
+        .take(PDF_MAGIC.len() as u64)
+        .read_to_end(&mut head)?;
+    Ok(if head.starts_with(PDF_MAGIC) {
+        config.pdf_max_bytes
+    } else {
+        config.max_bytes
+    })
 }
 
 fn refusal(error: RenderError) -> &'static str {
@@ -460,6 +488,56 @@ pub(crate) mod tests {
             .unwrap()
         }
 
+        /// `photo.png` on disk (PNG magic) and in the index as document `h3`,
+        /// read by the image reader: one page, recognised (`ocr:vision`), with
+        /// the text "abc".
+        fn picture(&self) {
+            const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            let file = self.root_dir.path().join("photo.png");
+            std::fs::write(&file, PNG).unwrap();
+            let disk = mnema_walk::stat(&file).unwrap();
+            self.state
+                .with_index(|db| {
+                    db.insert_document("h3", "image/png", 8, SourceKind::Document)?;
+                    let page = db.insert_page("h3", 1, "ocr:vision", None)?;
+                    db.insert_block(
+                        page,
+                        &Block {
+                            block_type: BlockType::Paragraph,
+                            reading_order: 0,
+                            language: None,
+                            text: "abc".to_string(),
+                            line_start: None,
+                            line_end: None,
+                        },
+                    )?;
+                    db.set_document_status("h3", DocumentStatus::Indexed)?;
+                    db.insert_path(
+                        self.root,
+                        "photo.png",
+                        "h3",
+                        OnDisk {
+                            size_bytes: disk.size_bytes,
+                            mtime: disk.mtime,
+                        },
+                        "image",
+                        1,
+                    )
+                })
+                .unwrap();
+        }
+
+        /// Lengthens `name` under the root to `len` bytes, its first bytes kept.
+        /// Sparse: no disk is spent.
+        fn set_len(&self, name: &str, len: u64) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.root_dir.path().join(name))
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+
         fn request(&self) -> RenderRequest {
             serde_json::from_str(&std::fs::read_to_string(&self.log).expect("the worker ran"))
                 .unwrap()
@@ -505,6 +583,14 @@ pub(crate) mod tests {
                 h: 0.04,
                 primary: true,
             }],
+        }
+    }
+
+    /// `None` for a page that was not drawn, so an assertion can name its case.
+    fn highlight_of(view: &PdfPageView) -> Option<Highlight> {
+        match view {
+            PdfPageView::Page { highlight, .. } => Some(*highlight),
+            PdfPageView::Unavailable { .. } => None,
         }
     }
 
@@ -641,7 +727,7 @@ pub(crate) mod tests {
         assert!(!s.log.exists(), "the worker was started");
     }
 
-    /// The worker reads the whole file, so a file over the pool's PDF ceiling
+    /// The worker reads the whole file, so a PDF over the pool's PDF ceiling
     /// is refused before it is started. Sparse: no disk is spent.
     #[test]
     fn a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker() {
@@ -668,6 +754,100 @@ pub(crate) mod tests {
             highlight(&s.render(&worker, "h1", "doc.pdf", 800)),
             Highlight::Shown
         );
+    }
+
+    /// Two ceilings, as ingest has (D189): a picture is held to `max_bytes`, a
+    /// PDF of the same size is not. The file's first bytes decide, not its
+    /// name nor what the index read there: `doc.pdf`, indexed as a PDF and now
+    /// holding a picture, is held to the picture's ceiling.
+    #[test]
+    fn a_picture_is_held_to_the_ceiling_of_a_file_that_is_not_a_pdf() {
+        let s = stand();
+        s.picture();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        let config = PoolConfig::new(&worker);
+        assert!(config.max_bytes < config.pdf_max_bytes);
+        let over = config.max_bytes + 1;
+
+        s.set_len("photo.png", over);
+        assert_eq!(
+            s.render(&worker, "h3", "photo.png", 800),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            },
+            "a picture over its ceiling"
+        );
+        assert!(!s.log.exists(), "the worker was started");
+
+        s.set_len("photo.png", config.max_bytes);
+        let view = s.render(&worker, "h3", "photo.png", 800);
+        assert_eq!(
+            highlight_of(&view),
+            Some(Highlight::Shown),
+            "a picture at its ceiling: {view:?}"
+        );
+        std::fs::remove_file(&s.log).unwrap();
+
+        s.set_len("doc.pdf", over);
+        let view = s.render(&worker, "h1", "doc.pdf", 800);
+        assert_eq!(
+            highlight_of(&view),
+            Some(Highlight::Shown),
+            "a PDF the same size: {view:?}"
+        );
+        std::fs::remove_file(&s.log).unwrap();
+
+        std::fs::copy(
+            s.root_dir.path().join("photo.png"),
+            s.root_dir.path().join("doc.pdf"),
+        )
+        .unwrap();
+        s.set_len("doc.pdf", over);
+        assert_eq!(
+            s.render(&worker, "h1", "doc.pdf", 800),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            },
+            "a PDF's path that now holds a picture"
+        );
+        assert!(!s.log.exists(), "the worker was started");
+    }
+
+    /// A picture's page is always a recognition (`ocr:vision`): with a passage
+    /// cited it is asked for with the hash and a second recognition under the
+    /// scan deadline; with nothing cited (a page strip) it is a drawing under
+    /// the native one. The worker takes 1 s, between the two deadlines.
+    #[test]
+    fn a_picture_is_recognised_under_the_scan_deadline_only_when_something_is_cited() {
+        let s = stand();
+        s.picture();
+        let slow = s.script(&format!(
+            "sleep 1\nprintf '%s\\n' '{}'\n",
+            serde_json::to_string(&rendered(TextMatch::Match)).unwrap()
+        ));
+        let (native, scan) = (Duration::from_millis(300), Duration::from_secs(20));
+
+        let view = s.render_within(&slow, "h3", "photo.png", 800, &CITED, native, scan);
+        let sent = s.request();
+        assert!(sent.recognise, "a cited picture is recognised again");
+        assert_eq!(sent.text_sha256.as_deref(), Some(ABC));
+        assert_eq!(
+            highlight_of(&view),
+            Some(Highlight::Shown),
+            "held to the scan deadline: {view:?}"
+        );
+        std::fs::remove_file(&s.log).unwrap();
+
+        assert_eq!(
+            s.render_within(&slow, "h3", "photo.png", 800, &[], native, scan),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            },
+            "nothing cited: held to the native deadline"
+        );
+        let sent = s.request();
+        assert!(!sent.recognise, "nothing cited, nothing to box");
+        assert_eq!(sent.text_sha256, None);
     }
 
     #[test]

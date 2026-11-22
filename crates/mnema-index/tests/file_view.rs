@@ -293,6 +293,18 @@ fn a_scanned_page_is_found_only_when_one_was_read_by_ocr() {
     assert!(db.has_scanned_page().unwrap());
 }
 
+/// A picture's page is a recognition too: an index whose only recognised page
+/// is a photo's still needs the OCR engine warm.
+#[test]
+fn a_picture_is_a_scanned_page() {
+    let db = support::temp_db();
+    let doc = db
+        .insert_document(&"e".repeat(64), "image/png", 1, SourceKind::Document)
+        .unwrap();
+    db.insert_page(&doc, 1, "ocr:vision", None).unwrap();
+    assert!(db.has_scanned_page().unwrap());
+}
+
 #[test]
 fn the_view_carries_the_documents_mime() {
     let db = support::temp_db();
