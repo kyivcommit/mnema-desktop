@@ -103,15 +103,13 @@ mod platform {
         let source = unsafe { CGImageSource::with_data(&data, None) }
             .ok_or_else(|| ImageError::Malformed("not a picture ImageIO can open".into()))?;
         let source = Source(source);
-        if count(&source) == 0 {
-            return Err(ImageError::Malformed("the picture has no frames".into()));
-        }
+        // No frame 0 has no properties, so this also refuses an empty source.
         // Measured: JPEG magic followed by garbage is a source of one frame
         // with status Complete — but no pixel size, which no real frame lacks.
         // SAFETY: reading an immutable CFString constant ImageIO exports.
         if number(&source, 0, unsafe { kCGImagePropertyPixelWidth }).is_none() {
             return Err(ImageError::Malformed(
-                "the first frame has no pixel size".into(),
+                "no first frame with a pixel size".into(),
             ));
         }
         Ok(source)
@@ -142,8 +140,8 @@ mod platform {
 
     /// The number under `key` in frame `index`'s properties, if there is one.
     fn number(source: &Source, index: usize, key: &CFString) -> Option<f64> {
-        // SAFETY: `options` is None; ImageIO returns None for an index out of
-        // range.
+        // SAFETY: `options` is None; measured, ImageIO returns None for an
+        // index out of range.
         let props = unsafe { source.0.properties_at_index(index, None) }?;
         // SAFETY: ImageIO's property dictionaries have CFString keys; values
         // are only read as CFType and downcast with a type check.
@@ -160,17 +158,12 @@ mod platform {
     }
 
     pub(super) fn frame(source: &Source, index: usize) -> Result<OwnedPageImage, ImageError> {
-        let frames = count(source);
-        if index >= frames {
-            return Err(ImageError::Malformed(format!(
-                "frame {index} asked of a picture with {frames}"
-            )));
-        }
         // Per call, as in `ocr.rs`: a worker decodes many frames on one thread
         // whose outermost pool is never drained.
         autoreleasepool(|_| {
             // SAFETY: the options dictionary holds the keys and value types
-            // ImageIO documents for them (two CFBooleans, one CFNumber).
+            // ImageIO documents for them (two CFBooleans, one CFNumber). An
+            // index past the last frame gives None (measured), not a bad read.
             let image = unsafe {
                 source
                     .0
