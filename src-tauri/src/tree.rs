@@ -629,7 +629,9 @@ pub(crate) const MAX_BLOCKS: usize = 50_000;
 )]
 pub enum DocumentView {
     File {
-        /// `document.mime`: a PDF is drawn as its page, anything else as text.
+        /// `document.mime`, by which the interface picks how the file is drawn:
+        /// as its page for a PDF or a picture (`PICTURE_PAGE_MIMES`), as HTML
+        /// for `DOC_PAGE_MIMES`, and as text for anything else.
         mime: String,
         blocks: Vec<ViewBlock>,
         /// Every block the focused citation covers, in reading order — a chunk
