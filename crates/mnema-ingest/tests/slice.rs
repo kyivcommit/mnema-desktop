@@ -6092,7 +6092,9 @@ const SCAN_UK: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/scan-u
 
 /// Vision's cold start is measured in tens of seconds (Task 8 gave the pool
 /// 300 s for it); the fixture's 10 s would time a correct read out.
-#[cfg(target_os = "macos")]
+///
+/// On every platform: a picture goes to the image reader everywhere, and a
+/// test about one runs off macOS too, where the answer is `not_text`.
 const OCR_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `(page_no, text_source, ocr_confidence, width_px, height_px, dpi)` of every
