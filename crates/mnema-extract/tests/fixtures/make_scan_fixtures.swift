@@ -5,7 +5,8 @@
 //     swift make_scan_fixtures.swift
 //
 // Writes scan-uk.pdf, scan-two-columns.pdf, mixed-native-scan.pdf,
-// scan-six-pages.pdf and scan-rotated-90.pdf next to the script — or only the ones named:
+// scan-six-pages.pdf, scan-rotated-90.pdf and the image-*.{png,jpg,heic,tif}
+// fixtures plus not-heif.mp4 next to the script — or only the ones named:
 //
 //     swift make_scan_fixtures.swift scan-six-pages.pdf
 //
@@ -23,6 +24,7 @@
 import CoreGraphics
 import CoreText
 import Foundation
+import ImageIO
 import PDFKit
 
 let dpi: CGFloat = 300
@@ -42,10 +44,11 @@ func line(_ text: String) -> CTLine {
     return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs as [NSAttributedString.Key: Any]))
 }
 
-/// Draws `lines` top to bottom, the first baseline `top` points below the page top.
-func draw(_ lines: [String], x: CGFloat, top: CGFloat, in ctx: CGContext) {
+/// Draws `lines` top to bottom, the first baseline `top` points below the top
+/// of a surface `height` points tall (a page, unless an image card says otherwise).
+func draw(_ lines: [String], x: CGFloat, top: CGFloat, in ctx: CGContext, height: CGFloat = pageH) {
     for (i, text) in lines.enumerated() {
-        ctx.textPosition = CGPoint(x: x, y: pageH - top - CGFloat(i) * leading)
+        ctx.textPosition = CGPoint(x: x, y: height - top - CGFloat(i) * leading)
         CTLineDraw(line(text), ctx)
     }
 }
@@ -182,4 +185,113 @@ if only.isEmpty || only.contains("scan-rotated-90.pdf") {
     let doc = PDFDocument(data: data as Data)!
     doc.page(at: 0)!.rotation = 90
     precondition(doc.write(to: URL(fileURLWithPath: "scan-rotated-90.pdf")), "write scan-rotated-90.pdf")
+}
+
+// ---- Image files (the image reader). The same `ukLines` as scan-uk.pdf, on a
+// card the width of an A4 page and only as tall as the text, so each file
+// stays small. 300 dpi, black on white, except where a fixture says otherwise.
+//
+// image-uk.webp is not written here — ImageIO reads WebP but cannot write it:
+//
+//     cwebp -quiet -q 85 image-uk.png -o image-uk.webp
+
+let cardH: CGFloat = 280
+
+enum Surface { case rgb, gray, transparent }
+
+/// `lines` on a card, as an image of the given kind.
+func card(_ lines: [String], _ surface: Surface = .rgb) -> CGImage {
+    let w = Int(pageW * dpi / 72), h = Int(cardH * dpi / 72)
+    let ctx: CGContext
+    switch surface {
+    case .rgb, .transparent:
+        ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    case .gray:
+        ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+    }
+    if surface == .transparent {
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+    } else {
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    }
+    ctx.scaleBy(x: dpi / 72, y: dpi / 72)
+    draw(lines, x: 60, top: 50, in: ctx, height: cardH)
+    return ctx.makeImage()!
+}
+
+/// `image` turned a quarter turn counter-clockwise: what a camera held sideways
+/// stores, and what `Orientation = 6` tells a viewer to turn back.
+func turnedCounterClockwise(_ image: CGImage) -> CGImage {
+    let ctx = CGContext(data: nil, width: image.height, height: image.width, bitsPerComponent: 8,
+                        bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    ctx.translateBy(x: CGFloat(image.height), y: 0)
+    ctx.rotate(by: .pi / 2)
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    return ctx.makeImage()!
+}
+
+/// A picture with no text: a few soft shapes on a gradient, like a photo.
+func blankPhoto() -> CGImage {
+    let w = 1000, h = 750
+    let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                              colors: [CGColor(red: 0.2, green: 0.4, blue: 0.7, alpha: 1),
+                                       CGColor(red: 0.9, green: 0.8, blue: 0.5, alpha: 1)] as CFArray,
+                              locations: [0, 1])!
+    ctx.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: h), options: [])
+    ctx.setFillColor(CGColor(red: 0.1, green: 0.5, blue: 0.2, alpha: 1))
+    ctx.fillEllipse(in: CGRect(x: 120, y: 80, width: 420, height: 260))
+    ctx.setFillColor(CGColor(red: 0.8, green: 0.3, blue: 0.2, alpha: 0.8))
+    ctx.fillEllipse(in: CGRect(x: 560, y: 300, width: 300, height: 300))
+    return ctx.makeImage()!
+}
+
+/// Writes `frames` to `name` as `type`, each with its own properties.
+func writeImage(_ name: String, _ type: String, _ frames: [(CGImage, [CFString: Any])]) {
+    if !only.isEmpty && !only.contains(name) { return }
+    let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: name) as CFURL, type as CFString,
+                                              frames.count, nil)!
+    for (image, props) in frames { CGImageDestinationAddImage(dst, image, props as CFDictionary) }
+    precondition(CGImageDestinationFinalize(dst), "write \(name)")
+}
+
+// 0.6 rather than a camera's ~0.85: the text survives it (measured with the
+// reader), and the files stay small enough to commit.
+let lossy: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.6]
+// LZW (5): uncompressed, the three frames are 17 MB.
+let lzw: [CFString: Any] = [kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFCompression: 5]]
+writeImage("image-uk.png", "public.png", [(card(ukLines), [:])])
+writeImage("image-uk.jpg", "public.jpeg", [(card(ukLines), lossy)])
+writeImage("image-uk.heic", "public.heic", [(card(ukLines), lossy)])
+// ImageIO hands a gray file back as 8 bits per pixel; Vision reads nothing from
+// a gray bitmap given as-is (`ocr.rs`), so this is the reader's redraw to BGRA
+// under test.
+writeImage("image-uk-gray.png", "public.png", [(card(ukLines, .gray), [:])])
+// Black text on nothing: drawn onto black, it would vanish.
+writeImage("image-uk-transparent.png", "public.png", [(card(ukLines, .transparent), [:])])
+var turned = lossy
+turned[kCGImagePropertyOrientation] = 6
+writeImage("image-uk-exif6.jpg", "public.jpeg", [(turnedCounterClockwise(card(ukLines)), turned)])
+writeImage("image-blank.jpg", "public.jpeg", [(blankPhoto(), lossy)])
+// Text, no text, text: the middle frame is the one a reader must skip and name.
+writeImage("image-three-frames.tif", "public.tiff", [
+    (card(sixPages[0], .gray), lzw),
+    (blankPhoto(), lzw),
+    (card(sixPages[2], .gray), lzw),
+])
+
+// The magic an HEIF file shares with video: `ftyp` at offset 4. Only the brand
+// (`isom` here, MP4) says it is not a picture.
+if only.isEmpty || only.contains("not-heif.mp4") {
+    var bytes: [UInt8] = [0x00, 0x00, 0x00, 0x18]
+    bytes += Array("ftypisom".utf8) + [0x00, 0x00, 0x02, 0x00] + Array("isomiso2".utf8)
+    bytes += [UInt8](repeating: 0, count: 40)
+    precondition(FileManager.default.createFile(atPath: "not-heif.mp4", contents: Data(bytes)), "write not-heif.mp4")
 }
