@@ -24,8 +24,8 @@
 # the case that says so.
 case_ "a pdf page reaches the pdf arm by the name its header carries" \
   crates/mnema-ingest/src/lib.rs \
-  's~                READER_PDF => PageContext::Fixed~                "pdf-by-another-name" => PageContext::Fixed~' \
-  '                "pdf-by-another-name" => PageContext::Fixed' \
+  's~                READER_PDF | READER_IMAGE => PageContext::Fixed~                "pdf-by-another-name" | READER_IMAGE => PageContext::Fixed~' \
+  '                "pdf-by-another-name" | READER_IMAGE => PageContext::Fixed' \
   mnema-ingest 'a_pdf_chunk_cites_its_page_not_nothing' --test slice
 
 # C2. And the number on it is the page's own. A constant passes a one-page
