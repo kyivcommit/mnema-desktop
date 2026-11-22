@@ -19,8 +19,8 @@
 // red. The constant is `mnema-core`'s because neither side of that boundary
 // owns it.
 pub use mnema_core::manifest::{
-    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_MARKDOWN, READER_PDF, READER_TEXT,
-    READER_XLSX, ReaderId,
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_IMAGE, READER_MARKDOWN, READER_PDF,
+    READER_TEXT, READER_XLSX, ReaderId,
 };
 
 /// Bumped by whoever changes what that reader produces from the same bytes.
@@ -39,6 +39,8 @@ pub const HTML_READER_VERSION: u32 = 1;
 pub const EPUB_READER_VERSION: u32 = 1;
 pub const DOCX_READER_VERSION: u32 = 1;
 pub const XLSX_READER_VERSION: u32 = 1;
+/// Image: Apple Vision OCR of a picture's frames.
+pub const IMAGE_READER_VERSION: u32 = 1;
 
 /// Every reader this build ships, by the name it answers to on the wire, and
 /// the version of it this build has.
@@ -47,7 +49,7 @@ pub const XLSX_READER_VERSION: u32 = 1;
 /// would be the same fact written twice, and the day a reader is added to one
 /// and not the other is the day the parent stops re-reading it — silently, for
 /// the life of the index.
-const READERS: [(&str, u32); 7] = [
+const READERS: [(&str, u32); 8] = [
     (READER_TEXT, TEXT_READER_VERSION),
     (READER_MARKDOWN, MARKDOWN_READER_VERSION),
     (READER_PDF, PDF_READER_VERSION),
@@ -55,6 +57,7 @@ const READERS: [(&str, u32); 7] = [
     (READER_EPUB, EPUB_READER_VERSION),
     (READER_DOCX, DOCX_READER_VERSION),
     (READER_XLSX, XLSX_READER_VERSION),
+    (READER_IMAGE, IMAGE_READER_VERSION),
 ];
 
 /// Today's version of the reader that answers to `reader`, or `None` for a
@@ -157,6 +160,7 @@ mod tests {
             READER_EPUB,
             READER_DOCX,
             READER_XLSX,
+            READER_IMAGE,
         ] {
             assert!(
                 reader_version(reader).is_some(),
@@ -195,5 +199,12 @@ mod tests {
         for (reader, version) in READERS {
             assert_eq!(manifest.version_of(reader), Some(version), "{reader}");
         }
+    }
+
+    /// The image reader's name and version are wire values, so this states the
+    /// literals rather than the constants: it pins what the constants say.
+    #[test]
+    fn the_manifest_knows_the_image_reader_at_version_one() {
+        assert_eq!(manifest().version_of("image"), Some(1));
     }
 }

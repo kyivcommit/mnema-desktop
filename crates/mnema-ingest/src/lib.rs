@@ -31,7 +31,7 @@ use std::sync::atomic::AtomicBool;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::manifest::{
-    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_IMAGE, READER_PDF, READER_XLSX,
 };
 use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
 use mnema_index::{
@@ -1545,7 +1545,7 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
                 // The page number the reader gave this page, not its position
                 // among the pages that arrived: a reader that drops a page it
                 // cannot read leaves a gap, and the gap is the honest record.
-                READER_PDF => PageContext::Fixed(Coordinate::Page {
+                READER_PDF | READER_IMAGE => PageContext::Fixed(Coordinate::Page {
                     number: page.page_no,
                 }),
                 // A section is the whole of what these three have to point at,
@@ -1580,3 +1580,45 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
 // `mnema-index` already depended on, D45), and the measurement is
 // `mnema_walk::stat` — the walk is the only place that looks at the disk, and
 // this crate now only ever compares the numbers it is handed (§5).
+
+#[cfg(test)]
+mod pages_of_tests {
+    use super::*;
+    use mnema_core::manifest::READER_TEXT;
+    use mnema_pool::ExtractedPage;
+
+    fn document(reader: &str, page_no: u32) -> Document {
+        Document {
+            sha256: String::new(),
+            mime: "application/octet-stream".into(),
+            source_kind: SourceKind::Document,
+            reader: reader.into(),
+            reader_version: 1,
+            pages: vec![ExtractedPage {
+                page_no,
+                section_title: None,
+                text_source: None,
+                ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
+                blocks: Vec::new(),
+            }],
+            skipped_pages: Vec::new(),
+            text_source: "ocr:vision".into(),
+        }
+    }
+
+    /// A frame of a picture cites its number like a PDF page; a text reader's
+    /// page still cites lines. Page 3, not 1, so a constant 1 cannot pass.
+    #[test]
+    fn an_image_page_cites_its_page_number_and_a_text_page_still_cites_lines() {
+        let image = document(READER_IMAGE, 3);
+        assert_eq!(
+            pages_of(&image)[0].context,
+            PageContext::Fixed(Coordinate::Page { number: 3 })
+        );
+        let text = document(READER_TEXT, 3);
+        assert_eq!(pages_of(&text)[0].context, PageContext::Lines);
+    }
+}
