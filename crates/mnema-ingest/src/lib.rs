@@ -1505,7 +1505,7 @@ struct PageOf<'a> {
 /// **A reader whose name is not among the arms falls to `Lines` without
 /// complaint.** That is the right default — a build that adds a text-shaped
 /// reader gets line numbers, which is what such a reader emits — and it is also
-/// where a name that does not match is spent. For the four page-shaped formats
+/// where a name that does not match is spent. For the page-shaped formats
 /// that is `Coordinate::None`, the defect this function was written to fix,
 /// back again. For xlsx it is worse and quieter: those blocks *do* carry row
 /// numbers, so the default answers `Coordinate::Line { start: 10, end: 20 }` —
