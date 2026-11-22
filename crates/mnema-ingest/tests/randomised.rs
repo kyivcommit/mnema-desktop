@@ -3506,12 +3506,6 @@ impl World {
         // verdict of its own to judge until something makes one.
         self.calling = None;
         self.draw();
-        // Beside the draw, not in its table: a slot there shifts the RNG and
-        // with it the whole corpus (docx and xlsx went missing when one was
-        // added). Its frame count comes from the counter for the same reason.
-        if n % 8 == 5 {
-            self.a_picture_is_read();
-        }
         // Every invariant again at the end of the step, including for a step
         // that never called `ingest_file` at all.
         //
@@ -5305,6 +5299,20 @@ fn setting(name: &str, fallback: usize) -> usize {
 fn run(seed: u64, steps: usize) -> Reached {
     let mut world = World::new(seed);
     for n in 1..=steps {
+        world.step(n);
+    }
+    world.settle();
+    // **Pictures after the first settle, not among the steps.** Any change to
+    // the steps — a slot in the draw table, a picture every eighth step — moves
+    // the corpus every older mutation case was measured against: the first
+    // lost docx and xlsx, the second the page-row clean-up `task-14.sh` C1
+    // needs. So the forty steps and their settle stay as they were, and the
+    // pictures get eight steps of their own, mixed with drawn operations, and a
+    // second settle.
+    for n in steps + 1..=steps + 8 {
+        if n % 2 == 1 {
+            world.a_picture_is_read();
+        }
         world.step(n);
     }
     world.settle();
