@@ -214,6 +214,10 @@ fn a_file_shorter_than_the_pdf_magic_is_a_non_pdf_for_the_ceiling() {
 /// found rather than read. Before this, a genuine photo came back as
 /// `mime: text/plain`, `source_kind: document`, one block holding the file's
 /// bytes as Latin-1 mojibake: no skip, no journal row, no refusal.
+///
+/// Since the image reader, a photo without text is refused *by that reader*,
+/// still as `not_text` — on every platform, since off macOS there is no
+/// decoder and that is the answer a picture got before.
 #[test]
 fn a_photo_is_refused_by_the_real_worker() {
     let out = run_worker(&["{\"path\":\"tests/fixtures/solid.png\",\"max_bytes\":1048576}"]);
@@ -225,12 +229,18 @@ fn a_photo_is_refused_by_the_real_worker() {
             rule,
             reason,
             sha256,
-            ..
+            reader,
+            reader_version,
         } => {
             assert_eq!(rule, "not_text");
             assert!(
-                reason.contains("not text"),
+                reason.contains("no text"),
                 "the reason is what the window shows a person: {reason:?}"
+            );
+            assert_eq!(
+                (reader.as_deref(), *reader_version),
+                (Some("image"), Some(1)),
+                "refused by the image reader, which is what lets it displace"
             );
             // The digest of the bytes this verdict was reached on, and the
             // parent cannot do without it: it is the only thing that tells a
@@ -612,6 +622,8 @@ fn every_reader_the_worker_emits_is_one_the_manifest_can_version() {
         markdown.to_str().expect("a temp path is UTF-8").to_string(),
         html.to_str().expect("a temp path is UTF-8").to_string(),
         "tests/fixtures/one-page-text.pdf".to_string(),
+        // Read on macOS, refused as `not_text` elsewhere: named either way.
+        "tests/fixtures/image-uk.png".to_string(),
         epub.to_str().expect("a temp path is UTF-8").to_string(),
         docx.to_str().expect("a temp path is UTF-8").to_string(),
         xlsx.to_str().expect("a temp path is UTF-8").to_string(),
@@ -2419,6 +2431,211 @@ fn a_document_with_more_sections_than_the_ceiling_is_refused_under_its_reader() 
         matches!(at_cap.first(), Some(Frame::Header { pages: 3, .. })),
         "{at_cap:?}"
     );
+}
+
+// --- pictures, read by OCR of their frames ------------------------------------
+
+/// The answer to one picture under `env`.
+fn picture(name: &str, env: &[(&str, &str)]) -> Vec<Frame> {
+    frames_of(&run_worker_with_env(&[&pdf_request(name)], env))
+}
+
+/// The refusal a picture is answered with, alone, after checking that it is
+/// the image reader's and carries the file's own digest. Returns its rule.
+fn image_refusal(name: &str, frames: &[Frame]) -> String {
+    match frames {
+        [
+            Frame::Refused {
+                rule,
+                sha256,
+                reader,
+                reader_version,
+                ..
+            },
+        ] => {
+            assert_eq!(
+                (reader.as_deref(), *reader_version),
+                (Some("image"), Some(1)),
+                "{name}"
+            );
+            let path = format!("tests/fixtures/{name}");
+            assert_eq!(sha256.as_deref(), Some(digest_of(&path).as_str()), "{name}");
+            rule.clone()
+        }
+        other => panic!("{name}: expected exactly one refusal, got {other:?}"),
+    }
+}
+
+/// Every picture with text is one page Vision read: a header naming the image
+/// reader and the picture's own type, one `ocr:vision` page with what the
+/// bitmap was, the words, and a summary that skipped nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_with_text_is_one_page_read_by_vision() {
+    for (name, want_mime) in [
+        ("image-uk.png", "image/png"),
+        ("image-uk.jpg", "image/jpeg"),
+        ("image-uk.heic", "image/heic"),
+        ("image-uk.webp", "image/webp"),
+        ("image-uk-gray.png", "image/png"),
+        ("image-uk-transparent.png", "image/png"),
+        ("image-uk-exif6.jpg", "image/jpeg"),
+    ] {
+        let frames = picture(name, &[]);
+        match frames.first() {
+            Some(Frame::Header {
+                mime,
+                reader,
+                reader_version,
+                pages,
+                ..
+            }) => assert_eq!(
+                (mime.as_str(), reader.as_str(), *reader_version, *pages),
+                (want_mime, "image", 1, 1),
+                "{name}"
+            ),
+            other => panic!("{name}: expected a header, got {other:?}"),
+        }
+        let pages: Vec<_> = frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Page {
+                    page_no,
+                    text_source,
+                    ocr_confidence,
+                    width_px,
+                    height_px,
+                    ..
+                } => Some((
+                    *page_no,
+                    text_source.as_deref(),
+                    ocr_confidence.is_some(),
+                    width_px.is_some() && height_px.is_some(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pages, [(1, Some("ocr:vision"), true, true)], "{name}");
+        let text = block_texts(&frames).concat();
+        for word in ["їжак", "єнот", "бібліотеки", "collegium"] {
+            assert!(
+                text.contains(word),
+                "{name}: {word:?} missing from {text:?}"
+            );
+        }
+        match frames.last() {
+            Some(Frame::Summary {
+                skipped_pages,
+                text_source,
+            }) => assert_eq!(
+                (skipped_pages.as_slice(), text_source.as_str()),
+                (&[][..], "ocr:vision"),
+                "{name}"
+            ),
+            other => panic!("{name}: expected a summary, got {other:?}"),
+        }
+    }
+}
+
+/// A picture with nothing legible is refused by the image reader as
+/// `not_text` — never `no_text_layer`, which from the same reader version
+/// would keep the text of the picture this file used to be. No header: the
+/// refusal is the whole answer. Off macOS the same, for want of a decoder.
+#[test]
+fn a_picture_without_text_is_refused_as_not_text_by_the_image_reader() {
+    for name in ["image-blank.jpg", "solid.png"] {
+        let frames = picture(name, &[]);
+        assert_eq!(image_refusal(name, &frames), "not_text");
+    }
+}
+
+/// A multi-frame TIFF is a page per frame: the blank frame between two pages
+/// of text is named as skipped, and the pages keep their own numbers.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tiff_is_a_page_per_frame_and_its_blank_frame_is_skipped() {
+    let frames = picture("image-three-frames.tif", &[]);
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { pages: 3, .. })),
+        "{frames:?}"
+    );
+    // Each page with the text of its own blocks.
+    let mut read: Vec<(u32, String)> = Vec::new();
+    for frame in &frames {
+        match frame {
+            Frame::Page { page_no, .. } => read.push((*page_no, String::new())),
+            Frame::Block(b) => read.last_mut().expect("a block follows its page").1 += &b.text,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        read.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        [1, 3],
+        "{frames:?}"
+    );
+    assert!(read[0].1.contains("Сторінка 1"), "{read:?}");
+    assert!(read[1].1.contains("Сторінка 3"), "{read:?}");
+    assert!(
+        matches!(frames.last(), Some(Frame::Summary { skipped_pages, .. }) if skipped_pages == &[2]),
+        "{frames:?}"
+    );
+}
+
+/// Vision not running is not a fact about the picture: `Failed`, which the
+/// pool keeps no verdict from, and never a refusal that would be remembered
+/// past the engine's repair (D57).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unavailable_engine_fails_a_picture_rather_than_refusing_it() {
+    let frames = picture("image-uk.png", &[(mnema_extract::OCR_UNAVAILABLE_ENV, "1")]);
+    assert!(
+        matches!(frames.as_slice(), [Frame::Failed { .. }]),
+        "{frames:?}"
+    );
+}
+
+/// A picture with more frames than one document may have pages is refused
+/// before any header, as `malformed`, like a PDF over the ceiling — and so is
+/// a picture the decoder cannot open.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_over_the_page_ceiling_or_undecodable_is_refused_as_malformed() {
+    let name = "image-three-frames.tif";
+    let frames = picture(name, &[(mnema_extract::MAX_PAGES_ENV, "2")]);
+    assert_eq!(image_refusal(name, &frames), "malformed");
+    let Some(Frame::Refused { reason, .. }) = frames.first() else {
+        unreachable!("checked above");
+    };
+    assert!(
+        reason.contains("3 frames") && reason.contains("2"),
+        "{reason}"
+    );
+
+    // JPEG magic and nothing a decoder can make a frame of.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zlamane.jpg");
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    bytes.extend_from_slice(b"this picture ends here");
+    std::fs::write(&path, &bytes).unwrap();
+    let request = serde_json::json!({ "path": path.display().to_string(), "max_bytes": 1_048_576 });
+    match frames_of(&run_worker(&[&request.to_string()])).as_slice() {
+        [
+            Frame::Refused {
+                rule,
+                sha256,
+                reader,
+                ..
+            },
+        ] => {
+            assert_eq!(rule, "malformed");
+            assert_eq!(reader.as_deref(), Some("image"));
+            assert_eq!(
+                sha256.as_deref(),
+                Some(digest_of(path.to_str().unwrap()).as_str())
+            );
+        }
+        other => panic!("expected one refusal, got {other:?}"),
+    }
 }
 
 /// `--render-page`: one line on stdin, one line on stdout, exit 0. Returns the

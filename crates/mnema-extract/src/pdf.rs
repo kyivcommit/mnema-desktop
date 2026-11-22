@@ -510,7 +510,12 @@ impl InOrder {
 }
 
 /// One page of text, read natively or recognised.
-fn page_of(page_no: u32, raw: &str, text_source: &'static str, ocr: Option<OcrPage>) -> PdfPage {
+pub(crate) fn page_of(
+    page_no: u32,
+    raw: &str,
+    text_source: &'static str,
+    ocr: Option<OcrPage>,
+) -> PdfPage {
     // Once, before the text is stored and after the threshold has been
     // taken from the same normalisation (D32, D38): `text_layer_chars`
     // normalises to count, so the string admitted and the string kept are

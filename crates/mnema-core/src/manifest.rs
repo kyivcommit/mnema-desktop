@@ -73,10 +73,11 @@ pub const READER_XLSX: &str = "xlsx";
 /// a literal there and never listed here. Rust cannot enumerate a string that
 /// does not exist anywhere; the rule is that a reader this build ships is named
 /// in this file, and this is the list it is named in.
-pub const READER_NAMES: [&str; 7] = [
+pub const READER_NAMES: [&str; 8] = [
     READER_TEXT,
     READER_MARKDOWN,
     READER_PDF,
+    READER_IMAGE,
     READER_HTML,
     READER_DOCX,
     READER_EPUB,

@@ -1,4 +1,5 @@
-//! Decoding a picture into the bitmap [`crate::recognise`] reads.
+//! Decoding a picture into the bitmap [`crate::recognise`] reads, and reading
+//! its frames as pages ([`extract_image_pages`]).
 //!
 //! **macOS ImageIO, then a redraw.** ImageIO opens every format the OS knows
 //! (PNG, JPEG, HEIC, TIFF, WebP, …) and hands back frames in whatever pixel
@@ -16,6 +17,9 @@
 //! multi-page TIFF is decoded frame by frame as [`Frames::frame`] is called.
 
 use crate::OwnedPageImage;
+use crate::ocr::{OcrError, recognise};
+use crate::pdf::{OcrPage, PdfPage, TEXT_SOURCE_OCR, page_cap, page_of};
+use crate::pdfium_probe::{has_text_layer, text_layer_chars};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ImageError {
@@ -47,6 +51,62 @@ impl Frames {
     pub fn frame(&self, index: usize) -> Result<OwnedPageImage, ImageError> {
         platform::frame(&self.0, index)
     }
+}
+
+/// Why a picture could not be read as pages.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ImageReadError {
+    /// A fact about the file (`Malformed`) or the platform (`Unsupported`).
+    #[error(transparent)]
+    Image(#[from] ImageError),
+    /// The engine did not run — never a fact about the picture (D57).
+    #[error(transparent)]
+    Ocr(#[from] OcrError),
+}
+
+/// Reads a picture as pages, one per frame: each frame is recognised in
+/// order, one whose text passes the same threshold as a PDF page is handed to
+/// `on_page(declared, page)`, and the 1-based numbers of the rest come back.
+pub fn extract_image_pages(
+    bytes: &[u8],
+    mut on_page: impl FnMut(u32, PdfPage),
+) -> Result<Vec<u32>, ImageReadError> {
+    let frames = open(bytes)?;
+    let count = frames.count();
+    // Before any page is handed over, so before the worker writes a header —
+    // as `extract_pdf_pages` does: a TIFF of 5000 frames opens in milliseconds.
+    let cap = page_cap();
+    if count > cap as usize {
+        return Err(ImageError::Malformed(format!(
+            "this picture holds {count} frames, over the {cap} one document may have (D1)"
+        ))
+        .into());
+    }
+    let declared = count as u32;
+    let mut skipped = Vec::new();
+    // shortcut: frames are recognised one by one on this thread, so a
+    // multi-frame TIFF takes the sum of its frames; move to
+    // `ocr_parallel::Helpers` if large scanned TIFFs become common.
+    for page_no in 1..=declared {
+        let image = frames.frame(page_no as usize - 1)?;
+        match recognise(&image.as_image())? {
+            Some(read) if has_text_layer(text_layer_chars(&read.text)) => {
+                let ocr = OcrPage {
+                    confidence: read.confidence,
+                    width_px: read.width_px,
+                    height_px: read.height_px,
+                    dpi: read.dpi,
+                };
+                on_page(
+                    declared,
+                    page_of(page_no, &read.text, TEXT_SOURCE_OCR, Some(ocr)),
+                );
+            }
+            // Nothing legible worth a page, or no engine on this platform.
+            _ => skipped.push(page_no),
+        }
+    }
+    Ok(skipped)
 }
 
 #[cfg(not(target_os = "macos"))]

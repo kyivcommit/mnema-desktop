@@ -266,8 +266,8 @@ case_ "journal: the row remembers the reader that refused the file" \
 # now read.
 case_ "manifest: every reader this build names has a row in the version table" \
   crates/mnema-extract/src/manifest.rs \
-  's#    \(READER_PDF, PDF_READER_VERSION\),\n##; s#const READERS: \[\(&str, u32\); 7\] = \[#const READERS: [(&str, u32); 6] = [#' \
-  'const READERS: [(&str, u32); 6] = [' \
+  's#    \(READER_PDF, PDF_READER_VERSION\),\n##; s#const READERS: \[\(&str, u32\); 8\] = \[#const READERS: [(&str, u32); 7] = [#' \
+  'const READERS: [(&str, u32); 7] = [' \
   mnema-extract 'manifest::tests::every_reader_this_build_ships_has_a_version' --lib
 
 # M2. The table never reaching the manifest this build prints: the lookup is
