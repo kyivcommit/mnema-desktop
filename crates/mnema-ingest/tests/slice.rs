@@ -6296,6 +6296,143 @@ fn a_whole_scan_v3_refused_is_indexed_by_v4_and_its_journal_row_goes() {
     assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
 }
 
+// ------------------------------------------------- pictures read by Vision
+
+#[cfg(target_os = "macos")]
+const IMAGE_UK_PNG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-uk.png");
+#[cfg(target_os = "macos")]
+const IMAGE_UK_JPG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-uk.jpg");
+#[cfg(target_os = "macos")]
+const IMAGE_BLANK_JPG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-blank.jpg");
+
+/// The whole-file journal rules for `path`, page rows left out.
+#[cfg(target_os = "macos")]
+fn whole_file_skip_rules(fx: &Fixture, path: &str) -> Vec<String> {
+    fx.db
+        .skips_for_root(fx.root_id)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.relative_path == path && r.page_no.is_none())
+        .map(|r| r.rule)
+        .collect()
+}
+
+/// Spec «Що зникне» 2, the half `a_text_file_overwritten_by_a_photo_stops_answering`
+/// cannot reach: the picture that replaces the note *has* text. There the old
+/// document goes through a refusal (`record_skip`); here through an indexing
+/// (`repoint`), and the new one is a picture's — one page, cited by page, what
+/// OCR knew on its row. A build that refused every picture passes that test and
+/// fails this one; so does one citing a picture by lines, which is `None`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_text_file_overwritten_by_a_picture_with_text_answers_with_the_picture() {
+    let fx = Fixture::new();
+    let path = "notes/kropyva.txt";
+    fx.place_at(path, "кропива росте попід тином\n".as_bytes(), mtime());
+    assert!(matches!(fx.ingest(path), Ingested::Indexed { .. }));
+    assert!(
+        !fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at(path, IMAGE_UK_PNG, mtime_just_after());
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+
+    assert!(
+        fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+    let entry = fx.db.path_entry(fx.root_id, path).unwrap().unwrap();
+    assert_eq!((entry.reader.as_str(), entry.reader_version), ("image", 1));
+    let mime: String = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT mime FROM document WHERE id = ?1",
+            [&entry.document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mime, "image/png");
+
+    let rows = page_rows(&fx, path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (page_no, source, confidence, width, height, _dpi) = rows[0].clone();
+    assert_eq!((page_no, source.as_str()), (1, "ocr:vision"), "{rows:?}");
+    assert!(
+        confidence.is_some_and(|c| (0.0..=1.0).contains(&c)),
+        "{rows:?}"
+    );
+    assert!(
+        width.is_some_and(|w| w > 0) && height.is_some_and(|h| h > 0),
+        "{rows:?}"
+    );
+    for word in ["їжак", "єнот", "бібліотеки", "collegium"] {
+        assert_eq!(
+            coordinate_of(&fx, word),
+            Coordinate::Page { number: 1 },
+            "{word}"
+        );
+    }
+}
+
+/// Spec «Що зникне» 1, both ways, under one camera name. A photo with text is
+/// overwritten by one without (a camera reset reusing `IMG_0001.jpg`): the
+/// picture's own reader refuses it, the same reader that made the document,
+/// and the document must still go — `a_text_file_overwritten_by_a_photo_stops_answering`
+/// has a `text` document refused by `image`, so a rule keeping the document
+/// when its own reader refused would pass there. Then back: the journal row
+/// the refusal left must go when the path is indexed again, or the window
+/// would say a searchable file has no text.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_photo_losing_its_text_and_regaining_it_leaves_and_rejoins_the_index() {
+    let fx = Fixture::new();
+    let path = "camera/IMG_0001.jpg";
+    fx.place_at(path, IMAGE_UK_JPG, mtime());
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("їжак", 10).unwrap().is_empty(),
+        "the premise fails if the photo's text was never searchable"
+    );
+
+    fx.place_at(path, IMAGE_BLANK_JPG, mtime_just_after());
+    assert_eq!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_none());
+    assert!(
+        fx.db.search_lexical("їжак", 10).unwrap().is_empty(),
+        "the old photo's text still answers for a photo without any"
+    );
+    assert_eq!(whole_file_skip_rules(&fx, path), vec!["not_text"]);
+
+    fx.place_at(
+        path,
+        IMAGE_UK_JPG,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_some());
+    assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+    assert!(
+        whole_file_skip_rules(&fx, path).is_empty(),
+        "an indexed photo has no journal row saying it has no text"
+    );
+}
+
 /// `too_large` under `pdf_max_bytes` is a fact about the setting, not the file
 /// (D44/D52): raising the PDF ceiling reads the same bytes. A native PDF, so
 /// this holds on every platform.
