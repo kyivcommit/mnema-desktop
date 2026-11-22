@@ -273,7 +273,8 @@ export type PaneSpan = { blockId: number; blockStart: number; length: number; pr
 // tree's name for the watched root that path belongs to, null when there is none.
 export type DocumentView =
   | { kind: 'file';
-      // `document.mime`: a PDF is drawn as its page, anything else as text.
+      // `document.mime`: which pane draws it — `PICTURE_PAGE_MIMES` as its page
+      // picture, `DOC_PAGE_MIMES` as HTML, anything else as text.
       mime: string;
       blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
       focusBlockIds: number[]; spans: PaneSpan[]; relativePath: string | null; rootName: string | null;
@@ -338,7 +339,7 @@ export const openDocument = (location: DocumentLocation, focus: DocumentFocus | 
 export const revealDocument = (location: DocumentLocation) =>
   invoke<void>('reveal_document', { rootId: location.rootId, relativePath: location.relativePath });
 
-// One PDF page drawn by `render_pdf_page` (`page_view.rs`). `image` is a data URL;
+// One page drawn by `render_pdf_page` (`page_view.rs`): a PDF's, or a picture's frame. `image` is a data URL;
 // `rects` are fractions 0..1 of the page's width and height. `highlight` says
 // whether they can be trusted: `shown` the citation, `changed` the file moved
 // since indexing, `scan` no text layer, `noText` nothing indexed for the page,

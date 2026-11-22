@@ -1,4 +1,12 @@
 <script module lang="ts">
+  // The types `render_pdf_page` draws as a picture: a PDF, and the pictures
+  // the image reader takes, by the mime the worker reports
+  // (`mnema-extract/src/typing.rs::image_mime`). One set for the pane's branch
+  // and the launcher's Page / Text choice, so the two cannot part.
+  export const PICTURE_PAGE_MIMES: ReadonlySet<string> = new Set([
+    'application/pdf', 'image/jpeg', 'image/png', 'image/tiff', 'image/webp', 'image/heic',
+  ]);
+
   // The width asked of the renderer: the pane's width in device pixels, rounded
   // UP to a multiple of 200 and capped at the backend's own ceiling. Rounding
   // keeps a drag of the splitter from asking for a new picture on every pixel.
