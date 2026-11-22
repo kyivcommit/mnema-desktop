@@ -254,6 +254,34 @@ fn a_partial_magic_is_not_a_picture() {
     }
 }
 
+/// Magic made of printable bytes is text until the byte that is not: `II*`
+/// is TIFF only with the NUL after it, and `ftyp` is HEIF only inside a box
+/// whose size leads with zeros. Both lines are prose and stay prose.
+#[test]
+fn text_that_begins_like_a_magic_is_still_text() {
+    for line in [
+        "II* — нотатка, що випадково почалась так.\n".as_bytes(),
+        "abcdftypheic і далі звичайний текст нотатки.\n".as_bytes(),
+    ] {
+        assert_eq!(
+            identify(line, Some("txt")).reader,
+            Reader::PlainText,
+            "{line:?}"
+        );
+    }
+}
+
+/// `mif1` is the brand HEIF writers use as the major one when the file only
+/// declares itself generic; a real camera HEIC may carry it.
+#[test]
+fn a_heif_with_the_generic_brand_is_a_picture() {
+    let mut mif1 = vec![0, 0, 0, 0x18];
+    mif1.extend_from_slice(b"ftypmif1");
+    mif1.extend_from_slice(&[0u8; 12]);
+    let t = identify(&mif1, None);
+    assert_eq!((t.reader, t.mime), (Reader::Image, "image/heic"));
+}
+
 /// The other direction: an image detector that says yes to every binary
 /// fails here.
 #[test]

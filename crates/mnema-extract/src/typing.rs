@@ -58,12 +58,13 @@ pub enum Reader {
     /// zip-based format this crate does not yet know. Not an error — this
     /// function never fails — but there is no reader for it either.
     Unrecognized,
-    /// Not text at all: a photo, a video, a database, an executable. Decided
-    /// by `classify` over the file's own bytes (D51).
+    /// Not text at all: a video, a database, an executable — and, from the
+    /// image reader, a picture with no text in it. Decided by `classify` over
+    /// the file's own bytes (D51), or by the image reader finding nothing.
     ///
     /// Separate from `Unrecognized`, which means "a zip whose required member
-    /// is missing" — a format this crate may yet learn. This one never will:
-    /// there is no future release in which a JPEG is read as prose.
+    /// is missing" — a format this crate may yet learn. This one is not a
+    /// format waiting for a reader: these bytes hold no prose to read.
     NotText,
     /// Text for its first `HEAD_BYTES` and binary after that: a file that
     /// *began* as text and stopped being one. An interrupted append is the
@@ -72,8 +73,8 @@ pub enum Reader {
     /// Separate from `NotText` although both are refused and both carry
     /// `application/octet-stream`, because the two say different things about
     /// what the index should still hold under the path. `NotText` says the
-    /// file is a photo and whatever text the index has under that name is a
-    /// previous file; this says the prose the index has is probably still the
+    /// file holds no text and whatever text the index has under that name is
+    /// a previous file; this says the prose the index has is probably still the
     /// first 84% of the file on disk, so deleting it would lose text readable
     /// nowhere else.
     BinaryTail,
@@ -95,7 +96,10 @@ const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 const TIFF_LE_MAGIC: &[u8] = &[b'I', b'I', 0x2A, 0x00];
 const TIFF_BE_MAGIC: &[u8] = &[b'M', b'M', 0x00, 0x2A];
 /// HEIF's major brands that are pictures (bytes 8..12 after `ftyp` at 4).
-/// `ftyp` alone is shared with MP4/MOV, so only the brand decides.
+/// `ftyp` alone is shared with MP4/MOV, so only the brand decides. The box's
+/// size comes first and an `ftyp` box is small, so its first two bytes are
+/// zero — which is also what keeps a line of text mentioning `ftyp` from
+/// reading as a picture.
 const HEIF_BRANDS: &[&[u8; 4]] = &[
     b"heic", b"heix", b"hevc", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1",
 ];
@@ -254,7 +258,8 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
         Some("image/tiff")
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         Some("image/webp")
-    } else if bytes.get(4..8) == Some(b"ftyp")
+    } else if bytes.get(0..2) == Some(&[0, 0])
+        && bytes.get(4..8) == Some(b"ftyp")
         && bytes
             .get(8..12)
             .is_some_and(|brand| HEIF_BRANDS.iter().any(|b| brand == *b))
