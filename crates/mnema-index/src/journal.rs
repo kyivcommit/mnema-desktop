@@ -185,7 +185,10 @@ declare_skip_rules! {
     /// while its `format_version` equals `INDEX_FORMAT_VERSION`, so a file
     /// skipped `NotText` is never looked at again unless that version moves
     /// **or** a migration ages this rule's rows (`RELEASE_NOT_TEXT`, migration
-    /// 11, did it for the image reader). Any future loosening of `classify`
+    /// 11, did it for the image reader). A row that names its reader — a
+    /// picture without text, refused by `image` — has a third lever, that
+    /// reader's version (`the_reader_has_moved_on` in `mnema_ingest`); a row
+    /// from `classify` names none, so only the first two reach it. Any future loosening of `classify`
     /// (the first candidate: UTF-16 without a byte-order mark) needs one of the
     /// two, or the files it would now accept stay refused forever; the
     /// migration is the cheaper one, since a bump releases every content rule

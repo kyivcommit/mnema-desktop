@@ -913,6 +913,9 @@ mod tests {
         .unwrap();
         for (path, page_no, rule) in [
             ("photo.jpg", None, "not_text"),
+            // Not a picture by its name: the rule is decided by the bytes (D51),
+            // so a JPEG under `.dat` was refused too and is aged with the rest.
+            ("clip.dat", None, "not_text"),
             ("pages.pdf", Some(2), "not_text"),
             ("scan.pdf", None, "no_text_layer"),
             ("a.xyz", None, "unsupported"),
@@ -964,6 +967,7 @@ mod tests {
             rows,
             vec![
                 row("photo.jpg", None, "not_text", 0),
+                row("clip.dat", None, "not_text", 0),
                 row("pages.pdf", Some(2), "not_text", 3),
                 row("scan.pdf", None, "no_text_layer", 3),
                 row("a.xyz", None, "unsupported", 3),
