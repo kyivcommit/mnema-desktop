@@ -19,7 +19,7 @@ I=crates/mnema-extract/src/image.rs
 
 # O1. The engine not running answered as `not_text`: a verdict about the file,
 # journalled, hidden by the folders tree, and kept past the engine's repair
-# (D57). Killed at `tests/worker_cli.rs:2589` (the engine made unavailable by
+# (D57). Killed at `tests/worker_cli.rs:2592` (the engine made unavailable by
 # its seam, so no Vision in the test).
 case_ "worker: an engine that did not run fails a picture and does not refuse it" \
   $W \
@@ -78,19 +78,21 @@ case_ "image: a multi-page TIFF is a page per frame" \
 
 # TH1. Every recognised frame a page: a photo with nothing legible is a
 # document of one empty page instead of `not_text`, and shows in the tree.
-# Killed at `tests/worker_cli.rs:2545` (Vision on `image-blank.jpg`).
+# Killed at `tests/worker_cli.rs:2551` (Vision on `image-blank.jpg`).
 case_ "image: a frame with nothing legible is not a page" \
   $I \
   's~            Some\(read\) if has_text_layer\(text_layer_chars\(&read\.text\)\) => \{~            Some(read) if true => {~' \
   '            Some(read) if true => {' \
   mnema-extract 'a_picture_without_text_is_refused_as_not_text_by_the_image_reader' --test worker_cli
 
-# Known survivor, deliberately not a case: `!read.text.trim().is_empty()` in
-# place of the threshold (any text a page, below the 48 characters a PDF page
-# needs) stays green. No fixture holds legible text under 48 characters: the
-# TIFF's blank frame and `image-blank.jpg` read as nothing at all, so TH1 is the
-# only side of the threshold a test sees. Closing it needs a short-text picture
-# in `make_scan_fixtures.swift`.
+# TH2. Any text a page, below the 48 characters a PDF page needs: a sign or a
+# caption becomes a document of a few words. Killed at
+# `tests/worker_cli.rs:2551` (Vision reads `image-short.png`'s three words).
+case_ "image: text short of the threshold is not a page" \
+  $I \
+  's~            Some\(read\) if has_text_layer\(text_layer_chars\(&read\.text\)\) => \{~            Some(read) if !read.text.trim().is_empty() => {~' \
+  '            Some(read) if !read.text.trim().is_empty() => {' \
+  mnema-extract 'a_picture_without_text_is_refused_as_not_text_by_the_image_reader' --test worker_cli
 
 # ── The page view draws the frame it boxes ───────────────────────────────────
 

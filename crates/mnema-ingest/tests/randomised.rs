@@ -3304,8 +3304,9 @@ impl World {
     ///
     /// A document whose pages are `ocr:vision` frames — only
     /// `image_reader_worker` writes those here — is cited by page, and the page
-    /// it names is one the document has. `Lines` would point at line numbers a
-    /// picture does not have, and the viewer would open no frame at all.
+    /// it names is one the document has. A chunk cited by line numbers, or by
+    /// no coordinate at all, points at nothing a picture has, and the viewer
+    /// would open no frame.
     fn check_a_picture_cites_its_frame(&self) {
         let chunks: Vec<(i64, String)> = self
             .db
@@ -4450,9 +4451,8 @@ impl World {
 
     /// **A photo of pages**: a picture with text, read by the image reader —
     /// one frame per line, so up to three is a multi-frame TIFF. A fresh file,
-    /// so the document is the image reader's own; a later walk reads the same
-    /// bytes with the real worker (text, by their content), which is the reader
-    /// changing hands again.
+    /// so the document is the image reader's own; a later walk that finds the
+    /// same bytes keeps it as it is.
     fn a_picture_is_read(&mut self) {
         #[cfg(unix)]
         {

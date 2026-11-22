@@ -279,6 +279,8 @@ var turned = lossy
 turned[kCGImagePropertyOrientation] = 6
 writeImage("image-uk-exif6.jpg", "public.jpeg", [(turnedCounterClockwise(card(ukLines)), turned)])
 writeImage("image-blank.jpg", "public.jpeg", [(blankPhoto(), lossy)])
+// Legible, and short of the 48 characters a page needs: a sign, a caption.
+writeImage("image-short.png", "public.png", [(card(["їжак і єнот"]), [:])])
 // Text, no text, text: the middle frame is the one a reader must skip and name.
 writeImage("image-three-frames.tif", "public.tiff", [
     (card(sixPages[0], .gray), lzw),

@@ -2541,9 +2541,12 @@ fn a_picture_with_text_is_one_page_read_by_vision() {
 /// `not_text`, the rule every photo had before this reader, which the folders
 /// tree hides. No header: the refusal is the whole answer. Off macOS the same,
 /// for want of a decoder.
+///
+/// `image-short.png` is the other side of the threshold: Vision reads its
+/// three words, and they are still short of what a page needs.
 #[test]
 fn a_picture_without_text_is_refused_as_not_text_by_the_image_reader() {
-    for name in ["image-blank.jpg", "solid.png"] {
+    for name in ["image-blank.jpg", "solid.png", "image-short.png"] {
         let frames = picture(name, &[]);
         assert_eq!(image_refusal(name, &frames), "not_text");
     }
