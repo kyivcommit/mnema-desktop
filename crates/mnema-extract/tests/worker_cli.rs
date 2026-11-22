@@ -2820,6 +2820,44 @@ fn render_page_boxes_a_scan_and_without_the_engine_draws_it_unboxed() {
     }
 }
 
+/// A picture through the real worker: its one frame, drawn and boxed on the
+/// text indexing stored -- no filter in front of `render_page` turns it away.
+#[cfg(target_os = "macos")]
+#[test]
+fn render_page_draws_and_boxes_a_picture() {
+    use mnema_core::render::{RenderReply, TextMatch};
+    use sha2::{Digest, Sha256};
+    let path = format!("{}/tests/fixtures/image-uk.png", env!("CARGO_MANIFEST_DIR"));
+    let mut text = String::new();
+    mnema_extract::extract_image_pages(&std::fs::read(&path).unwrap(), |_, page| {
+        text = page.blocks[0].text.clone();
+    })
+    .unwrap();
+    let sha: String = Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let len = text.lines().next().unwrap().chars().count();
+    let request = format!(
+        "{{\"path\":{path:?},\"page_no\":1,\"width_px\":400,\"text_sha256\":\"{sha}\",\"ranges\":[{{\"start\":0,\"len\":{len},\"primary\":true}}],\"recognise\":true}}\n"
+    );
+    match one_reply(&render_page_run(&request)) {
+        RenderReply::Rendered {
+            pages,
+            width_px,
+            png_base64,
+            text,
+            rects,
+            ..
+        } => {
+            assert_eq!((pages, width_px, text), (1, 400, TextMatch::Match));
+            assert_eq!(rects.len(), 1, "{rects:?}");
+            assert!(png_base64.starts_with("iVBOR"), "a PNG, base64");
+        }
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
 #[test]
 fn render_page_names_a_non_pdf_and_a_line_that_is_not_a_request() {
     use mnema_core::render::{RenderError, RenderReply};

@@ -645,3 +645,139 @@ fn recognise_false_on_a_scan_behaves_as_before_the_field_existed() {
     assert_eq!(on.text, TextMatch::Match);
     assert_eq!(on.rects.len(), 1, "{:?}", on.rects);
 }
+
+// ---- pictures: a page per frame, recognised from the bitmap indexing decoded ----
+
+/// Frame `page_no`'s text exactly as the image reader stores it.
+#[cfg(target_os = "macos")]
+fn picture_text(name: &str, page_no: u32) -> String {
+    let mut text = None;
+    let bytes = std::fs::read(fixture(name)).unwrap();
+    mnema_extract::extract_image_pages(&bytes, |_, page| {
+        if page.page_no == page_no {
+            text = Some(page.blocks[0].text.clone());
+        }
+    })
+    .unwrap();
+    text.expect("indexing keeps this frame")
+}
+
+#[cfg(target_os = "macos")]
+fn picture_request(
+    name: &str,
+    page_no: u32,
+    width_px: u32,
+    hashed_text: &str,
+    ranges: Vec<RenderRange>,
+) -> RenderRequest {
+    scan_request(name, page_no, width_px, hashed_text, ranges, true)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_is_boxed_where_it_shows_the_text_indexing_stored() {
+    let name = "image-uk.png";
+    let text = picture_text(name, 1);
+    let line = text.lines().next().unwrap();
+    let ranges = vec![range_of(&text, line, true)];
+
+    let r = rendered(&picture_request(name, 1, 800, &text, ranges.clone()));
+    assert_eq!((r.pages, r.width_px, r.height_px), (1, 800, 376));
+    assert_eq!(r.text, TextMatch::Match);
+    assert_eq!(r.rects.len(), 1, "{:?}", r.rects);
+    assert!(ink(&r, &r.rects[0], 0.0, 0.0) > 100, "no ink under the box");
+
+    // Control: the same picture and ranges, another text's hash.
+    let r = rendered(&picture_request(name, 1, 800, "інший текст", ranges));
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Unplaced, 0));
+    assert_eq!(r.width_px, 800, "the picture is still drawn");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_with_nothing_legible_is_drawn_with_no_text_to_compare() {
+    let r = rendered(&picture_request("solid.png", 1, 800, "будь-що", vec![]));
+    assert_eq!((r.pages, r.text, r.rects.len()), (1, TextMatch::None, 0));
+    // Never scaled up: an 8 px picture is shown 8 px wide.
+    assert_eq!((r.width_px, r.height_px), (8, 8));
+}
+
+/// A frame is a page: page 3 is the third frame, not the first one again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_page_of_a_tiff_is_its_own_frame_and_past_the_last_is_no_page() {
+    let name = "image-three-frames.tif";
+    let text = picture_text(name, 3);
+    assert!(text.contains("Сторінка 3"), "{text:?}");
+    let r = rendered(&picture_request(
+        name,
+        3,
+        800,
+        &text,
+        vec![range_of(&text, "Сторінка 3", true)],
+    ));
+    assert_eq!((r.pages, r.text, r.rects.len()), (3, TextMatch::Match, 1));
+    assert!(ink(&r, &r.rects[0], 0.0, 0.0) > 50, "no ink under the box");
+
+    // Frame 2 has a shape of its own (1000 x 750), unlike frames 1 and 3.
+    let mut req = picture_request(name, 2, 800, &text, vec![]);
+    req.recognise = false;
+    let r = rendered(&req);
+    assert_eq!(
+        (r.width_px, r.height_px, r.text),
+        (800, 600, TextMatch::None)
+    );
+
+    for page_no in [0, 4] {
+        let req = picture_request(name, page_no, 800, &text, vec![]);
+        assert_eq!(refusal(&req), RenderError::NoSuchPage, "page {page_no}");
+    }
+}
+
+/// A photo stored a quarter-turn round is shown upright, as indexing read it,
+/// and boxed on that upright picture.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_turned_by_exif_is_shown_and_boxed_upright() {
+    let name = "image-uk-exif6.jpg";
+    let text = picture_text(name, 1);
+    let line = text.lines().next().unwrap();
+    let r = rendered(&picture_request(
+        name,
+        1,
+        800,
+        &text,
+        vec![range_of(&text, line, true)],
+    ));
+    // The same shape as the upright `image-uk.png`: landscape.
+    assert_eq!((r.width_px, r.height_px), (800, 376));
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Match, 1));
+    let b = r.rects[0];
+    assert!(b.w > b.h, "the line runs along x: {b:?}");
+    assert!(ink(&r, &b, 0.0, 0.0) > 100, "no ink under the box");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_picture_png_is_the_size_reported_and_never_wider_than_the_frame() {
+    let name = "image-uk.png";
+    let mut req = picture_request(name, 1, 5000, "", vec![]);
+    req.recognise = false;
+    let r = rendered(&req);
+    // Not asked to recognise: no second read, so no verdict on the hash.
+    assert_eq!(r.text, TextMatch::None);
+    let (_, w, h) = decode(&r.png);
+    assert_eq!((w, h), (r.width_px, r.height_px));
+    assert_eq!((w, h), (2479, 1166));
+    assert!(w <= mnema_extract::page_view::MAX_WIDTH_PX);
+    assert!(h <= mnema_extract::page_view::MAX_HEIGHT_PX);
+}
+
+/// No decoder off macOS: the reply a picture got before it had a page view.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_picture_off_macos_is_refused_as_before() {
+    let mut req = request("one-page-text.pdf", 1, 800, vec![]);
+    req.path = fixture("image-uk.png").display().to_string();
+    assert_eq!(refusal(&req), RenderError::NotPdf);
+}
