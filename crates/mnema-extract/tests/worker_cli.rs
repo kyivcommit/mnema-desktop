@@ -413,7 +413,9 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     );
 
     for (path, want_rule) in [
-        ("tests/fixtures/solid.png", "not_text"),
+        // Bytes no reader claims, so `classify`'s own refusal: solid.png is a
+        // picture now, refused by the image reader (its own row).
+        ("tests/fixtures/binary.bin", "not_text"),
         // `one-page-text.pdf` used to be this row, under `unsupported`. It is
         // not refused at all any more — the pdf reader reads it — so the row
         // moved to the PDFs that *are* refused after being read, which is
@@ -2537,8 +2539,9 @@ fn render_page_boxes_a_scan_and_without_the_engine_draws_it_unboxed() {
 #[test]
 fn render_page_names_a_non_pdf_and_a_line_that_is_not_a_request() {
     use mnema_core::render::{RenderError, RenderReply};
-    let png = format!("{}/tests/fixtures/solid.png", env!("CARGO_MANIFEST_DIR"));
-    match one_reply(&render_page_run(&render_request(&png))) {
+    // Neither a PDF nor a picture: a picture has a page view of its own.
+    let bin = format!("{}/tests/fixtures/binary.bin", env!("CARGO_MANIFEST_DIR"));
+    match one_reply(&render_page_run(&render_request(&bin))) {
         RenderReply::Refused { error, .. } => assert_eq!(error, RenderError::NotPdf),
         other => panic!("{other:?}"),
     }

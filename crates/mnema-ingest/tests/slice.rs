@@ -3012,12 +3012,12 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
 fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
     let fx = Fixture::new();
     fx.place_at(
-        "photos/scan.png",
-        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        "data/archive.sqlite",
+        include_bytes!("../../mnema-extract/tests/fixtures/binary.bin"),
         mtime(),
     );
     assert_eq!(
-        fx.ingest("photos/scan.png"),
+        fx.ingest("data/archive.sqlite"),
         Ingested::Skipped {
             rule: SkipRule::NotText
         }
@@ -3032,13 +3032,13 @@ fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
         .execute(
             "UPDATE skipped SET format_version = format_version - 1
               WHERE watched_root_id = ?1 AND relative_path = ?2",
-            (fx.root_id, "photos/scan.png"),
+            (fx.root_id, "data/archive.sqlite"),
         )
         .unwrap();
 
     let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
     assert_eq!(
-        fx.ingest_with_worker("photos/scan.png", &broken),
+        fx.ingest_with_worker("data/archive.sqlite", &broken),
         Ingested::Skipped {
             rule: SkipRule::Crash
         },

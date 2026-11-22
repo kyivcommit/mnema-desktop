@@ -1567,14 +1567,16 @@ impl World {
         }
     }
 
-    /// A photo — the same synthetic solid-colour PNG the deterministic tests
-    /// use, invented outright by `make_fixtures.py`. Its first NUL sits at
-    /// offset 8, well inside the head window, so it is binary from the start.
+    /// A database file's opening — `binary.bin`, invented outright by
+    /// `make_fixtures.py`. Its first NUL sits at offset 15, well inside the
+    /// head window, so it is binary from the start, and no reader claims it by
+    /// its magic. (It was the solid-colour PNG until the image reader: a
+    /// picture is now read for its text, which would put Vision in this loop.)
     ///
     /// No markers: nothing here is ever indexed, and that is the point.
     fn not_text_body(&self) -> Content {
         Content {
-            bytes: include_bytes!("../../mnema-extract/tests/fixtures/solid.png").to_vec(),
+            bytes: include_bytes!("../../mnema-extract/tests/fixtures/binary.bin").to_vec(),
             markers: Vec::new(),
             shape: Shape::NotText,
         }

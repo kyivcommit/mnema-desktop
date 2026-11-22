@@ -311,7 +311,8 @@ fn what_is_not_a_page_of_a_pdf_is_refused_by_kind() {
     let pdf = base.path.clone();
 
     assert_eq!(
-        refusal(&with(fixture("solid.png").display().to_string(), 1)),
+        // Neither a PDF nor a picture, which has a page view of its own.
+        refusal(&with(fixture("binary.bin").display().to_string(), 1)),
         RenderError::NotPdf
     );
     assert_eq!(refusal(&with(pdf.clone(), 0)), RenderError::NoSuchPage);

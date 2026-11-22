@@ -382,6 +382,17 @@ def write_solid_png() -> None:
     (HERE / "solid.png").write_bytes(png)
 
 
+def write_binary_bin() -> None:
+    """A database file's opening and nothing else: binary from byte 15, and no
+    picture, archive or document format's magic.
+
+    For the tests whose subject is "not text" as such. solid.png answered that
+    until the image reader arrived; a PNG is now read for its text, so a test
+    about the content verdict itself needs bytes no reader claims.
+    """
+    (HERE / "binary.bin").write_bytes(b"SQLite format 3\x00" + bytes(496))
+
+
 if __name__ == "__main__":
     write("one-page-text.pdf", [[BODY_TEXT, BODY_TEXT_2]])
     # Page order is load-bearing here: the test asserts that the page carrying the
@@ -516,3 +527,4 @@ if __name__ == "__main__":
     # the rotation puts the box beside the words, not on them.
     write("rotated-90.pdf", [[BODY_TEXT, BODY_TEXT_2]], rotate={0: 90})
     write_solid_png()
+    write_binary_bin()

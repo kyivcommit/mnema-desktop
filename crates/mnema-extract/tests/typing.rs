@@ -211,10 +211,11 @@ fn a_file_that_starts_as_text_and_stops_is_not_the_same_as_a_photo() {
     assert_eq!(identify(&damaged, None).reader, Reader::BinaryTail);
     assert_eq!(identify(&damaged, Some("png")).reader, Reader::BinaryTail);
 
-    // And the photo does not drift onto this side: it is binary from its
-    // eighth byte, so it stays the verdict that is allowed to displace.
+    // And a file binary from the start does not drift onto this side: it stays
+    // the verdict that is allowed to displace. Not solid.png, which the image
+    // reader now claims by its magic before this verdict is asked.
     assert_eq!(
-        identify(include_bytes!("fixtures/solid.png"), Some("txt")).reader,
+        identify(include_bytes!("fixtures/binary.bin"), Some("txt")).reader,
         Reader::NotText
     );
     // Nor does the note reach a reader: it is refused, just not deleted.
