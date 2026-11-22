@@ -464,6 +464,38 @@ mod tests {
         assert_eq!(shown(&image, 500), unscaled);
     }
 
+    /// The mean is over the box's rows too, not its first row: a thin
+    /// horizontal stroke would otherwise vanish when 4000 px become 800.
+    #[test]
+    fn a_picture_scaled_down_averages_every_row_it_covers() {
+        let image = OwnedPageImage {
+            bgra: vec![
+                0, 0, 0, 255, 0, 0, 0, 255, 200, 100, 40, 255, 200, 100, 40, 255,
+            ],
+            width: 2,
+            height: 2,
+            stride: 8,
+            dpi: 72,
+        };
+        assert_eq!(shown(&image, 1), (vec![20, 50, 100, 255], 1, 1));
+    }
+
+    /// The worker's own ceiling, not the caller's: a request past it gets
+    /// `MAX_WIDTH_PX`, as a PDF page does.
+    #[test]
+    fn a_picture_wider_than_the_ceiling_is_shown_at_the_ceiling() {
+        let width = MAX_WIDTH_PX + 1;
+        let image = OwnedPageImage {
+            bgra: vec![255; width as usize * 4],
+            width,
+            height: 1,
+            stride: width as usize * 4,
+            dpi: 72,
+        };
+        let (_, w, h) = shown(&image, MAX_WIDTH_PX + 2000);
+        assert_eq!((w, h), (MAX_WIDTH_PX, 1));
+    }
+
     #[test]
     fn a_recognised_page_is_boxed_only_as_the_text_it_was_indexed_in() {
         let text = "Київ на березі";
