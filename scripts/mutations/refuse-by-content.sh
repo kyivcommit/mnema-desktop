@@ -201,9 +201,9 @@ case_ "wire: the worker sends the digest it refused on" \
 
 case_ "wire: the image reader sends the digest it refused on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~(or more characters"\n\s+\),\n\s+)Some\(sha256\),~${1}None,~' \
-  'or more characters"
-                    ),
+  's~(                    "not_text",\n\s+reason,\n\s+)Some\(sha256\),~${1}None,~' \
+  '"not_text",
+                    reason,
                     None,' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 

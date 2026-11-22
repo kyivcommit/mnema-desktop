@@ -2538,9 +2538,9 @@ fn a_picture_with_text_is_one_page_read_by_vision() {
 }
 
 /// A picture with nothing legible is refused by the image reader as
-/// `not_text` — never `no_text_layer`, which from the same reader version
-/// would keep the text of the picture this file used to be. No header: the
-/// refusal is the whole answer. Off macOS the same, for want of a decoder.
+/// `not_text`, the rule every photo had before this reader, which the folders
+/// tree hides. No header: the refusal is the whole answer. Off macOS the same,
+/// for want of a decoder.
 #[test]
 fn a_picture_without_text_is_refused_as_not_text_by_the_image_reader() {
     for name in ["image-blank.jpg", "solid.png"] {
@@ -2635,6 +2635,73 @@ fn a_picture_over_the_page_ceiling_or_undecodable_is_refused_as_malformed() {
             );
         }
         other => panic!("expected one refusal, got {other:?}"),
+    }
+}
+
+/// A frame that breaks after an earlier one was read: the header and that page
+/// have gone out, and the answer is still a refusal about the file, which the
+/// pool takes over the pages it holds (D189). The broken frame is made here
+/// from the fixture: frame 2's `ImageWidth` set to 0.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_frame_that_breaks_mid_way_refuses_the_picture_after_its_first_page() {
+    let mut tiff = std::fs::read("tests/fixtures/image-three-frames.tif").unwrap();
+    let big = &tiff[0..2] == b"MM";
+    let u16_at = |b: &[u8], at: usize| {
+        let v = [b[at], b[at + 1]];
+        if big {
+            u16::from_be_bytes(v)
+        } else {
+            u16::from_le_bytes(v)
+        }
+    };
+    let u32_at = |b: &[u8], at: usize| {
+        let v = [b[at], b[at + 1], b[at + 2], b[at + 3]];
+        (if big {
+            u32::from_be_bytes(v)
+        } else {
+            u32::from_le_bytes(v)
+        }) as usize
+    };
+    let ifd0 = u32_at(&tiff, 4);
+    let ifd1 = u32_at(&tiff, ifd0 + 2 + 12 * u16_at(&tiff, ifd0) as usize);
+    let width = (0..u16_at(&tiff, ifd1) as usize)
+        .map(|i| ifd1 + 2 + 12 * i)
+        .find(|&entry| u16_at(&tiff, entry) == 256)
+        .expect("frame 2 states its width");
+    // SHORT or LONG, left-justified in the entry's value field: zero either way.
+    tiff[width + 8..width + 12].fill(0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zlamanyi-kadr.tif");
+    std::fs::write(&path, &tiff).unwrap();
+    let request = serde_json::json!({ "path": path.display().to_string(), "max_bytes": 1_048_576 });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { .. })),
+        "{frames:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f, Frame::Page { page_no: 1, .. })),
+        "the first frame is read before the second breaks: {frames:?}"
+    );
+    match frames.last() {
+        Some(Frame::Refused {
+            rule,
+            sha256,
+            reader,
+            ..
+        }) => {
+            assert_eq!(rule, "malformed");
+            assert_eq!(reader.as_deref(), Some("image"));
+            assert_eq!(
+                sha256.as_deref(),
+                Some(digest_of(path.to_str().unwrap()).as_str())
+            );
+        }
+        other => panic!("expected the answer to end in a refusal, got {other:?}"),
     }
 }
 

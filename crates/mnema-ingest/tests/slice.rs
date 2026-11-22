@@ -3076,8 +3076,10 @@ fn a_text_file_overwritten_by_a_photo_stops_answering() {
         include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
         mtime_just_after(),
     );
+    // A picture now goes to Vision, whose first call from a fresh worker
+    // binary can take ~46 s — past the default deadline here.
     assert_eq!(
-        fx.ingest("notes/kropyva.txt"),
+        fx.ingest_with_timeout("notes/kropyva.txt", OCR_TIMEOUT),
         Ingested::Skipped {
             rule: SkipRule::NotText
         }

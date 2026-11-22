@@ -652,29 +652,37 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 pages: 0,
             });
             let on_page = |declared, page| emit_page(&mut header, emit, declared, page);
-            // `not_text`, never `no_text_layer`: a picture whose text is gone
-            // after an overwrite must displace the old document, and
-            // `no_text_layer` from the same reader version keeps it. Off macOS
-            // (no decoder) this is the answer a picture got before this reader.
-            let no_text = |sha256| {
+            // `not_text`, not `no_text_layer`: a picture with no text is what
+            // every photo was before this reader, and the folders tree hides
+            // `not_text` rather than marking each such photo as a scan that
+            // failed (`src-tauri/src/tree.rs`, `hides_the_file`). Both rules
+            // displace an old document once the bytes have changed.
+            let not_text = |sha256, reason| {
                 vec![reader_refused(
                     manifest::READER_IMAGE,
                     manifest::IMAGE_READER_VERSION,
                     "not_text",
-                    format!(
-                        "this picture holds no text: nothing in it reads as \
-                         {TEXT_LAYER_MIN_CHARS} or more characters"
-                    ),
+                    reason,
                     Some(sha256),
                 )]
             };
             match extract_image_pages(&bytes, on_page) {
-                Ok(_) if header.is_some() => no_text(sha256),
+                Ok(_) if header.is_some() => not_text(
+                    sha256,
+                    format!(
+                        "this picture holds no text: nothing in it reads as \
+                         {TEXT_LAYER_MIN_CHARS} or more characters"
+                    ),
+                ),
                 Ok(skipped_pages) => vec![Frame::Summary {
                     skipped_pages,
                     text_source: TEXT_SOURCE_OCR.to_string(),
                 }],
-                Err(ImageReadError::Image(ImageError::Unsupported(_))) => no_text(sha256),
+                // Off macOS: no decoder, so the answer a picture got before
+                // this reader — and a reason that does not claim it was looked at.
+                Err(ImageReadError::Image(e @ ImageError::Unsupported(_))) => {
+                    not_text(sha256, format!("this picture is not read here: {e}"))
+                }
                 // From the open, the cap or a frame mid-way: after a header,
                 // the stream ends here and the pool keeps none of it.
                 Err(ImageReadError::Image(e @ ImageError::Malformed(_))) => vec![reader_refused(
