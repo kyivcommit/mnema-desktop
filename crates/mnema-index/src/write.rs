@@ -54,9 +54,13 @@ use crate::{Db, DocumentStatus, Error};
 /// Read by a second table besides `chunk` and `skipped`: `create_space` makes
 /// the version part of a space's identity (`space.rs`), so a bump means the
 /// next `create_space` mints a new space rather than finding the old one. That
-/// is D14's intent — two formats side by side, each saying which it is — and
-/// today it costs nothing, since nothing outside tests calls it (D29 ships no
-/// local models in v1).
+/// is D14's intent — two formats side by side, each saying which it is — and it
+/// is not free: `adopt_embedding_model` reaches `create_space` from the product,
+/// and after a bump re-adopting the *same* model does not find its own space
+/// (`existing_space_id` filters on this version) and takes the new-model
+/// path. That is why a release that loosens one content rule
+/// releases that rule's rows by a migration instead (`RELEASE_NOT_TEXT` in
+/// `migrations.rs`), and a bump is kept for a change to the format itself.
 pub const INDEX_FORMAT_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize)]

@@ -3,8 +3,9 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::Error;
 
-/// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 10;
+/// Bumped whenever a migration is added — DDL, or rows a reader change
+/// releases (`RELEASE_NOT_TEXT`). Stored in PRAGMA user_version.
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -235,6 +236,28 @@ CREATE TABLE gitignore_include (
     PRIMARY KEY (watched_root_id, path_prefix)
 ) WITHOUT ROWID;";
 
+/// Releases every whole-file `not_text` verdict once, so the next walk asks a
+/// worker again: pictures stopped being `not_text` when the image reader
+/// arrived, and the second cheap arm (`mnema_ingest::ingest_file`) answers a
+/// row from `stat` for as long as its `format_version` is current.
+///
+/// **A row migration, not a bump of `INDEX_FORMAT_VERSION`.** The bump would
+/// release every content rule (each `no_text_layer` scan OCR'd again), and the
+/// version is part of an embedding space's identity (`space.rs`,
+/// `existing_space_id`), so re-adopting the same model afterwards would not
+/// find its own space.
+///
+/// **`UPDATE`, never `DELETE`.** The settings tree hides a file by the rule of
+/// its row whatever the version (`skips_for_root` → `hides_the_file` in the
+/// app), so the aged row keeps every photo, video and database hidden until a
+/// worker gives a new verdict; a deleted one would show each of them as an
+/// unread file until the walk reached it. Page rows are left alone: a page's
+/// verdict is not the file's, and the cheap arm never reads one.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` states.
+const RELEASE_NOT_TEXT: &str =
+    "UPDATE skipped SET format_version = 0 WHERE rule = 'not_text' AND page_no IS NULL;";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -256,6 +279,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_PAGE_OCR_CONFIDENCE),
         M::up(ADD_WATCHED_ROOT_CONFIRMED),
         M::up(ADD_GITIGNORE_INCLUDE),
+        M::up(RELEASE_NOT_TEXT),
     ])
 }
 
@@ -507,7 +531,7 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
@@ -592,7 +616,7 @@ mod tests {
         .expect("the six-column statements a version-6 database could have written");
 
         apply(&mut conn).expect("a version-6 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
 
         let (reason, size, reader, reader_version): (
             String,
@@ -688,7 +712,7 @@ mod tests {
         .expect("the statement a version-7 database could have run");
 
         apply(&mut conn).expect("a version-7 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
         assert!(
             has_column(&conn),
             "the upgrade must add `page.ocr_confidence`"
@@ -825,7 +849,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
     }
 
     /// D202 PR 3: the include table arrives in a migration of its own, and an
@@ -870,6 +894,81 @@ mod tests {
             .is_err(),
             "one include per path per root"
         );
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
+    }
+
+    /// Migration 11 ages exactly the whole-file `not_text` rows and keeps them:
+    /// every other rule, and a `not_text` page row, keep the version they were
+    /// written with, and the aged row keeps everything but its version (the
+    /// tree hides by it, so it must not be deleted).
+    #[test]
+    fn only_whole_file_not_text_rows_are_aged_and_none_is_deleted() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 10).unwrap();
+        conn.execute(
+            "INSERT INTO watched_root (id, absolute_path) VALUES (1, '/tmp/root')",
+            [],
+        )
+        .unwrap();
+        for (path, page_no, rule) in [
+            ("photo.jpg", None, "not_text"),
+            ("pages.pdf", Some(2), "not_text"),
+            ("scan.pdf", None, "no_text_layer"),
+            ("a.xyz", None, "unsupported"),
+            ("note.txt", None, "binary_tail"),
+            ("big.mov", None, "too_large"),
+        ] {
+            conn.execute(
+                "INSERT INTO skipped (watched_root_id, relative_path, page_no, reason, rule,
+                                      size_bytes, mtime, format_version)
+                 VALUES (1, ?1, ?2, 'why ' || ?1, ?3, 10, 20, 3)",
+                rusqlite::params![path, page_no, rule],
+            )
+            .unwrap();
+        }
+
+        apply(&mut conn).unwrap();
+
+        let rows: Vec<(String, Option<i64>, String, String, Option<i64>, i64)> = conn
+            .prepare(
+                "SELECT relative_path, page_no, rule, reason, size_bytes, format_version
+                   FROM skipped ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let row = |path: &str, page: Option<i64>, rule: &str, version: i64| {
+            (
+                path.to_string(),
+                page,
+                rule.to_string(),
+                format!("why {path}"),
+                Some(10),
+                version,
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row("photo.jpg", None, "not_text", 0),
+                row("pages.pdf", Some(2), "not_text", 3),
+                row("scan.pdf", None, "no_text_layer", 3),
+                row("a.xyz", None, "unsupported", 3),
+                row("note.txt", None, "binary_tail", 3),
+                row("big.mov", None, "too_large", 3),
+            ]
+        );
     }
 }

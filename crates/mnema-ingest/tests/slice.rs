@@ -3287,9 +3287,10 @@ fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
 /// `Unsupported` is the *least* stable verdict this product gives: the worker's
 /// own words for it are "no reader implemented yet"
 /// (`crates/mnema-extract/src/bin/worker.rs`), which is exactly what a release
-/// changes — where `NotText` promises the opposite, that "no release adds a
-/// reader that makes them prose". Task 10 made the stable rule conditional on
-/// the digest and left the unstable one deleting outright.
+/// changes — where `NotText` says the bytes are not text at all, a verdict a
+/// release reversed once (pictures) and by a migration. Task 10 made the
+/// stable rule conditional on the digest and left the unstable one deleting
+/// outright.
 ///
 /// What that costs is one document per file, silently: a folder indexed by a
 /// build that has a reader, walked once by a build that does not — a rollback,
@@ -6426,6 +6427,65 @@ fn a_photo_losing_its_text_and_regaining_it_leaves_and_rejoins_the_index() {
         Ingested::Indexed { .. }
     ));
     assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_some());
+    assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+    assert!(
+        whole_file_skip_rules(&fx, path).is_empty(),
+        "an indexed photo has no journal row saying it has no text"
+    );
+}
+
+/// A photo with text that a build before the image reader refused as
+/// `not_text` reaches the reader once the index is migrated (migration 11),
+/// and not before: at the version that build stamped, the second cheap arm
+/// answers from `stat` and the real worker — which would index it — is never
+/// asked. Both halves, so the test tells the aged row from the current one.
+///
+/// The old build's row is `record_skip` exactly as its worker sent it: a
+/// refusal before a reader was chosen, so no reader named. Its index is the
+/// same file at `user_version` 10 — migration 11 changes rows, not DDL — and
+/// reopening it runs the real migration.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_photo_an_older_build_refused_as_not_text_is_read_after_the_migration() {
+    let mut fx = Fixture::new();
+    let path = "camera/IMG_0002.jpg";
+    let on_disk = fx.place_at(path, IMAGE_UK_JPG, mtime());
+    fx.db
+        .record_skip(
+            fx.root_id,
+            path,
+            None,
+            "not text",
+            SkipRule::NotText,
+            mnema_walk::stat(&on_disk),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        },
+        "the control: a current-version row must answer without a worker"
+    );
+    assert!(fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+
+    fx.db
+        .conn()
+        .execute_batch("PRAGMA user_version = 10")
+        .unwrap();
+    fx.db = open(&fx.index_path).unwrap();
+    assert_eq!(
+        whole_file_skip_rules(&fx, path),
+        vec!["not_text"],
+        "the migration keeps the row, so the tree keeps the photo hidden"
+    );
+
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
     assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
     assert!(
         whole_file_skip_rules(&fx, path).is_empty(),

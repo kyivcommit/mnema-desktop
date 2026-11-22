@@ -518,8 +518,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
             frames
         }
         // Not "no reader yet" — the answer this branch gives for the other
-        // five. These bytes are not text at all, and no release adds a reader
-        // that makes them prose (D51).
+        // five. These bytes are not text at all (D51); a release that learns to
+        // read some of them (pictures, by OCR) releases their old rows with a
+        // migration (`RELEASE_NOT_TEXT`, mnema-index).
         Reader::NotText => {
             vec![refused_before_a_reader(
                 "not_text",

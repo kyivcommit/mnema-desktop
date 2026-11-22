@@ -1018,10 +1018,10 @@ fn the_reader_has_moved_on(skip: &SkipEntry, manifest: &Manifest) -> bool {
 /// Four of those five are refusals a *release* can reverse — a reader arrives,
 /// a reader gets better at damage, a password prompt is built, a threshold
 /// moves — and that is what puts them here rather than on the unconditional
-/// side. `NotText` is the exception that shows the condition is not free: it
-/// promises the opposite, that no release makes a photo into prose, and it is
-/// conditional anyway, because the file under the path can be replaced by one
-/// whose bytes the index never saw.
+/// side. `NotText` is the exception that shows the condition is not free: it is
+/// the stablest of them (a release reversed it once, for pictures, and did so
+/// by a migration), and it is conditional anyway, because the file under the
+/// path can be replaced by one whose bytes the index never saw.
 ///
 /// **Nothing displaces outright.** `NoTextLayer` did, on the strength of being
 /// dormant — no wire string reached it and no reader could earn it. The PDF
@@ -1247,8 +1247,8 @@ fn displaces(
         //
         // It arrived later than `NotText`'s and that order was an inversion:
         // the *stable* rule was made conditional first while the *unstable* one
-        // stayed unconditional. `NotText` promises "no release adds a reader
-        // that makes them prose" (`crates/mnema-extract/src/bin/worker.rs`);
+        // stayed unconditional. `NotText` says the bytes are not text at all
+        // (`crates/mnema-extract/src/bin/worker.rs`);
         // this one says "no reader implemented yet" in the same file, which is
         // the thing a release exists to change. A folder of PDFs indexed
         // through a future reader, walked once by a build that has it and once

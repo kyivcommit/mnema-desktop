@@ -2189,6 +2189,46 @@ mod tests {
         assert_eq!(state_of(&listing, "t.pdf").state, SubfolderState::Open);
     }
 
+    /// Migration 11 ages a `not_text` row so a walk reads the file again; until
+    /// it does, the tree must keep the photo hidden rather than show it as an
+    /// unread file. Through the index itself: a database at `user_version` 10
+    /// (migration 11 changes rows, not DDL) reopened, then `skips_for_root`.
+    #[cfg(unix)]
+    #[test]
+    fn a_photo_stays_not_read_after_its_not_text_row_is_aged() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index.sqlite");
+        let db = mnema_index::open(&index).unwrap();
+        let root = db.insert_watched_root("/tmp/root").unwrap();
+        db.record_skip(
+            root,
+            "p.jpg",
+            None,
+            "not text",
+            mnema_index::SkipRule::NotText,
+            None,
+            None,
+        )
+        .unwrap();
+        db.conn().execute_batch("PRAGMA user_version = 10").unwrap();
+        drop(db);
+        let db = mnema_index::open(&index).unwrap();
+
+        let entries = vec![entry(b"p.jpg", false, false)];
+        let listing = level_with(&entries, "", &[], &[], &db.skips_for_root(root).unwrap());
+        assert_eq!(state_of(&listing, "p.jpg").state, SubfolderState::NotRead);
+        let aged: i64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM skipped
+                  WHERE relative_path = 'p.jpg' AND format_version = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(aged, 1, "the premise: migration 11 aged this row");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_failed_file_carries_its_rule_and_reason() {
