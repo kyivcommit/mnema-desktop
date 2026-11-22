@@ -171,18 +171,96 @@ fn a_truncated_zip_is_not_mistaken_for_any_office_format_and_does_not_panic() {
 /// this same function: `photo.jpg` with extension `jpg`, `photo.png`,
 /// `photo.heic`, `data.sqlite`, a Mach-O binary with no extension and
 /// random bytes named `.mp4` — all six `mime=text/plain reader=PlainText`.
+/// A photo now reaches the image reader by its magic bytes; what is not a
+/// picture and not text is `binary.bin`'s case below.
 #[test]
 fn a_correctly_named_photo_is_not_plain_text() {
     let png = include_bytes!("fixtures/solid.png");
     let t = identify(png, Some("png"));
-    assert_eq!(t.reader, Reader::NotText);
-    assert_eq!(t.mime, "application/octet-stream");
+    assert_eq!(t.reader, Reader::Image);
+    assert_eq!(t.mime, "image/png");
     assert_eq!(t.source_kind, SourceKind::Document);
 
     // The extension is not what decides it, in either direction: the same
-    // bytes are refused named `png`, named `txt`, and named nothing.
-    assert_eq!(identify(png, None).reader, Reader::NotText);
-    assert_eq!(identify(png, Some("txt")).reader, Reader::NotText);
+    // bytes are a picture named `png`, named `txt`, and named nothing.
+    assert_eq!(identify(png, None).reader, Reader::Image);
+    assert_eq!(identify(png, Some("txt")).reader, Reader::Image);
+}
+
+/// Every picture format the image reader takes is named by its own magic.
+#[test]
+fn each_picture_format_is_recognized_by_its_magic() {
+    let cases: [(&[u8], &str); 6] = [
+        (include_bytes!("fixtures/image-uk.png"), "image/png"),
+        (include_bytes!("fixtures/image-uk.jpg"), "image/jpeg"),
+        (include_bytes!("fixtures/image-uk.heic"), "image/heic"),
+        (include_bytes!("fixtures/image-uk.webp"), "image/webp"),
+        (include_bytes!("fixtures/image-uk-gray.png"), "image/png"),
+        (
+            include_bytes!("fixtures/image-three-frames.tif"),
+            "image/tiff",
+        ),
+    ];
+    for (bytes, mime) in cases {
+        let t = identify(bytes, None);
+        assert_eq!((t.reader, t.mime), (Reader::Image, mime));
+        assert_eq!(t.source_kind, SourceKind::Document);
+    }
+    // The fixture is big-endian (`MM\0*`); little-endian (`II*\0`) is built.
+    let mut le = vec![0x49, 0x49, 0x2A, 0x00];
+    le.extend_from_slice(&[0u8; 16]);
+    let t = identify(&le, None);
+    assert_eq!((t.reader, t.mime), (Reader::Image, "image/tiff"));
+}
+
+/// HEIF shares `ftyp` with MP4/MOV, so only the major brand says picture.
+#[test]
+fn an_mp4_is_not_a_heif_picture() {
+    let t = identify(include_bytes!("fixtures/not-heif.mp4"), Some("heic"));
+    assert_eq!(t.reader, Reader::NotText);
+}
+
+/// Content decides: a JPEG named `txt` or nothing is still a picture.
+#[test]
+fn a_jpeg_is_a_picture_whatever_it_is_named() {
+    let jpg = include_bytes!("fixtures/image-uk.jpg");
+    assert_eq!(identify(jpg, Some("txt")).reader, Reader::Image);
+    assert_eq!(identify(jpg, None).reader, Reader::Image);
+}
+
+/// A magic that is only partly there is not a picture, and a short file must
+/// not panic the slicing.
+#[test]
+fn a_partial_magic_is_not_a_picture() {
+    let mut riff_wave = b"RIFF".to_vec();
+    riff_wave.extend_from_slice(&[0, 0, 0, 0]);
+    riff_wave.extend_from_slice(b"WAVE");
+    riff_wave.extend_from_slice(&[0u8; 8]);
+    let mut isom = vec![0, 0, 0, 0x18];
+    isom.extend_from_slice(b"ftypisom");
+    isom.extend_from_slice(&[0u8; 8]);
+    let mut short_ftyp = vec![0, 0, 0, 0x18];
+    short_ftyp.extend_from_slice(b"ftyp"); // 8 bytes: no brand to read
+    let mut heic_cut = short_ftyp.clone();
+    heic_cut.extend_from_slice(b"hei"); // 11 bytes: brand cut short
+    let mut jpeg_cut = vec![0xFF, 0xD8, 0x00];
+    jpeg_cut.extend_from_slice(&[0u8; 8]);
+    // Two bytes with no NUL are text to `classify`; the point is only that
+    // they are not a picture.
+    assert_ne!(identify(&[0xFF, 0xD8], None).reader, Reader::Image);
+    let cases: [&[u8]; 5] = [&riff_wave, &isom, &short_ftyp, &heic_cut, &jpeg_cut];
+    for bytes in cases {
+        assert_eq!(identify(bytes, None).reader, Reader::NotText, "{bytes:?}");
+    }
+}
+
+/// The other direction: an image detector that says yes to every binary
+/// fails here.
+#[test]
+fn binary_that_is_not_a_picture_stays_not_text() {
+    let t = identify(include_bytes!("fixtures/binary.bin"), Some("png"));
+    assert_eq!(t.reader, Reader::NotText);
+    assert_eq!(t.mime, "application/octet-stream");
 }
 
 /// D51. A file that opens as text and stops being one gets its own reader, and

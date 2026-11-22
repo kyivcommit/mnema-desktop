@@ -50,6 +50,10 @@ pub enum Reader {
     Docx,
     Xlsx,
     Epub,
+    /// A picture, read for its text by OCR of its frames. Decided by magic
+    /// bytes, like every binary format here: a JPEG's NULs would otherwise
+    /// send it to `NotText`.
+    Image,
     /// A zip signature whose required member is missing: a bare zip, or a
     /// zip-based format this crate does not yet know. Not an error — this
     /// function never fails — but there is no reader for it either.
@@ -85,6 +89,16 @@ pub struct FileType {
 /// Public because the worker reads this many bytes to pick a size ceiling
 /// before it decides to read the rest (D189).
 pub const PDF_MAGIC: &[u8] = b"%PDF-";
+
+const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
+const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+const TIFF_LE_MAGIC: &[u8] = &[b'I', b'I', 0x2A, 0x00];
+const TIFF_BE_MAGIC: &[u8] = &[b'M', b'M', 0x00, 0x2A];
+/// HEIF's major brands that are pictures (bytes 8..12 after `ftyp` at 4).
+/// `ftyp` alone is shared with MP4/MOV, so only the brand decides.
+const HEIF_BRANDS: &[&[u8; 4]] = &[
+    b"heic", b"heix", b"hevc", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1",
+];
 
 /// Local file header signature, present at the start of every non-empty zip.
 const ZIP_LOCAL_FILE_MAGIC: &[u8] = b"PK\x03\x04";
@@ -230,6 +244,27 @@ pub(crate) fn classify(bytes: &[u8]) -> Verdict {
     }
 }
 
+/// The mime of a picture the image reader takes, by its magic bytes alone.
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(JPEG_MAGIC) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(PNG_MAGIC) {
+        Some("image/png")
+    } else if bytes.starts_with(TIFF_LE_MAGIC) || bytes.starts_with(TIFF_BE_MAGIC) {
+        Some("image/tiff")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if bytes.get(4..8) == Some(b"ftyp")
+        && bytes
+            .get(8..12)
+            .is_some_and(|brand| HEIF_BRANDS.iter().any(|b| brand == *b))
+    {
+        Some("image/heic")
+    } else {
+        None
+    }
+}
+
 /// Decides what `bytes` are: magic first, where magic exists; the extension
 /// only when the bytes are plain text.
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
@@ -243,6 +278,14 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
 
     if bytes.starts_with(ZIP_LOCAL_FILE_MAGIC) || bytes.starts_with(ZIP_EMPTY_MAGIC) {
         return identify_zip(bytes);
+    }
+
+    if let Some(mime) = image_mime(bytes) {
+        return FileType {
+            mime,
+            source_kind: SourceKind::Document,
+            reader: Reader::Image,
+        };
     }
 
     // After the magic branches, never before: a PDF and every zip-based

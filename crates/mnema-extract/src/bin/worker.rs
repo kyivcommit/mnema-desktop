@@ -520,7 +520,11 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
         // Not "no reader yet" — the answer this branch gives for the other
         // five. These bytes are not text at all, and no release adds a reader
         // that makes them prose (D51).
-        Reader::NotText => {
+        //
+        // `Image` shares this arm only until the image reader lands: it
+        // answers what a photo got before `identify` learned to name one, and
+        // that reader replaces this arm.
+        Reader::NotText | Reader::Image => {
             vec![refused_before_a_reader(
                 "not_text",
                 "this file is not text: its bytes are not something this product reads".to_string(),
