@@ -627,7 +627,7 @@ jobs:
     #
     # `image-ocr` (pictures read for their text, 13 cases) joined the shortest leg of main run
     # 44917489452, `pr7-default-models pr10f-tray-locale task-11 task-4` at 6m52s; measured
-    # locally with a warm target directory, 51 s. Its macOS half, `image-ocr-macos`, is
+    # locally with a warm target directory, 60 s. Its macOS half, `image-ocr-macos`, is
     # not-in-matrix for the reason `scan-ocr-macos` is.
     #
     # Each entry of `leg:` is the file names of one bucket, space-separated,
