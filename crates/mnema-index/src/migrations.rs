@@ -930,7 +930,8 @@ mod tests {
 
         apply(&mut conn).unwrap();
 
-        let rows: Vec<(String, Option<i64>, String, String, Option<i64>, i64)> = conn
+        type Row = (String, Option<i64>, String, String, Option<i64>, i64);
+        let rows: Vec<Row> = conn
             .prepare(
                 "SELECT relative_path, page_no, rule, reason, size_bytes, format_version
                    FROM skipped ORDER BY id",

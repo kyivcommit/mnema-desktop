@@ -254,5 +254,6 @@ case_ "index: migration 8 is registered" \
   '        M::up(ADD_SKIP_READER),
         M::up(ADD_WATCHED_ROOT_CONFIRMED),
         M::up(ADD_GITIGNORE_INCLUDE),
+        M::up(RELEASE_NOT_TEXT),
     ])' \
   mnema-index 'migrations::tests::a_v7_index_gains_page_ocr_confidence_and_keeps_its_pages' --lib
