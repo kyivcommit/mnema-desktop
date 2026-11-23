@@ -233,10 +233,15 @@ fn a_photo_is_refused_by_the_real_worker() {
             reader_version,
         } => {
             assert_eq!(rule, "not_text");
-            assert!(
-                reason.contains("no text"),
-                "the reason is what the window shows a person: {reason:?}"
-            );
+            // The reason is what the window shows a person, and it differs:
+            // off macOS nothing looked at the picture, so it must not say
+            // the picture holds no text.
+            let said = if cfg!(target_os = "macos") {
+                "holds no text"
+            } else {
+                "not read here"
+            };
+            assert!(reason.contains(said), "{reason:?}");
             assert_eq!(
                 (reader.as_deref(), *reader_version),
                 (Some("image"), Some(1)),
