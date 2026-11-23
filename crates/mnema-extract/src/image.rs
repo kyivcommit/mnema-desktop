@@ -102,8 +102,18 @@ pub fn extract_image_pages(
                     page_of(page_no, &read.text, TEXT_SOURCE_OCR, Some(ocr)),
                 );
             }
-            // Nothing legible worth a page, or no engine on this platform.
-            _ => skipped.push(page_no),
+            // Nothing legible worth a page.
+            Some(_) => skipped.push(page_no),
+            // No engine on this platform says nothing about the picture, so it
+            // must not become "holds no text". Unreachable today (off macOS
+            // `open` has no decoder either); a decoder without OCR would land
+            // here, refused as "not read here" like a picture with no decoder.
+            None => {
+                return Err(ImageError::Unsupported(
+                    "there is no text recognition on this platform".into(),
+                )
+                .into());
+            }
         }
     }
     Ok(skipped)
@@ -178,7 +188,10 @@ mod platform {
     /// The formats whose frames are pages: a multi-page TIFF (a fax, a scan
     /// batch) and an HEIF image sequence. Every other format's extra frames
     /// are an animation — measured, an APNG of 50 frames is the same text 50
-    /// times — so it counts as its first frame only.
+    /// times — so it counts as its first frame only. A multi-image HEIC that
+    /// is not a sequence is typed `public.heic` (measured in review) and keeps
+    /// its first image too: the others are usually auxiliary images (a depth
+    /// or gain map), not pages.
     const PAGED_TYPES: [&str; 2] = ["public.tiff", "public.heics"];
 
     pub(super) fn count(source: &Source) -> usize {

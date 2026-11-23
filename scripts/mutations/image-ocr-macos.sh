@@ -94,6 +94,16 @@ case_ "image: text short of the threshold is not a page" \
   '            Some(read) if !read.text.trim().is_empty() => {' \
   mnema-extract 'a_picture_without_text_is_refused_as_not_text_by_the_image_reader' --test worker_cli
 
+# W2. The redraw written as RGBA where everything downstream reads BGRA: OCR,
+# search and highlights stay right, and every photo shown has red and blue
+# swapped. Every other fixture is black, white or gray. External review of
+# PR #107, item 1; killed at `tests/image.rs:102`.
+case_ "image: a frame is drawn in BGRA byte order" \
+  $I \
+  's~CGImageAlphaInfo::PremultipliedFirst\.0 [|] CGImageByteOrderInfo::Order32Little\.0~CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0~' \
+  'CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0' \
+  mnema-extract 'macos::a_red_pixel_is_decoded_into_bgra_order' --test image
+
 # ── The page view draws the frame it boxes ───────────────────────────────────
 
 # R1. Shown from the first frame, boxed from the frame asked for: page 2 of a

@@ -82,6 +82,26 @@ mod macos {
         }
     }
 
+    /// Red lands in the third byte, blue in the first: every other fixture is
+    /// black, white or gray, which reads the same in either channel order.
+    /// `image-blank.jpg` has a red ellipse centred at (710, 450) from the
+    /// bottom of a 1000x750 picture: red 0.8 over the gradient, about
+    /// R 195, B 70.
+    #[test]
+    fn a_red_pixel_is_decoded_into_bgra_order() {
+        let img = first("image-blank.jpg");
+        assert_eq!((img.width, img.height), (1000, 750));
+        let at = img.stride * (750 - 1 - 450) + 710 * 4;
+        let [b, _, r, a] = [
+            img.bgra[at],
+            img.bgra[at + 1],
+            img.bgra[at + 2],
+            img.bgra[at + 3],
+        ];
+        assert_eq!(a, 0xFF);
+        assert!(r > b + 80, "red {r} over blue {b} at the ellipse's centre");
+    }
+
     #[test]
     fn exif_orientation_is_applied() {
         let img = first("image-uk-exif6.jpg");
