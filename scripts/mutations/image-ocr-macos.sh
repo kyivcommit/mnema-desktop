@@ -19,7 +19,7 @@ I=crates/mnema-extract/src/image.rs
 
 # O1. The engine not running answered as `not_text`: a verdict about the file,
 # journalled, hidden by the folders tree, and kept past the engine's repair
-# (D57). Killed at `tests/worker_cli.rs:2592` (the engine made unavailable by
+# (D57). Killed at `tests/worker_cli.rs:2597` (the engine made unavailable by
 # its seam, so no Vision in the test).
 case_ "worker: an engine that did not run fails a picture and does not refuse it" \
   $W \
@@ -78,7 +78,7 @@ case_ "image: a multi-page TIFF is a page per frame" \
 
 # TH1. Every recognised frame a page: a photo with nothing legible is a
 # document of one empty page instead of `not_text`, and shows in the tree.
-# Killed at `tests/worker_cli.rs:2551` (Vision on `image-blank.jpg`).
+# Killed at `tests/worker_cli.rs:2556` (Vision on `image-blank.jpg`).
 case_ "image: a frame with nothing legible is not a page" \
   $I \
   's~            Some\(read\) if has_text_layer\(text_layer_chars\(&read\.text\)\) => \{~            Some(read) if true => {~' \
@@ -87,7 +87,7 @@ case_ "image: a frame with nothing legible is not a page" \
 
 # TH2. Any text a page, below the 48 characters a PDF page needs: a sign or a
 # caption becomes a document of a few words. Killed at
-# `tests/worker_cli.rs:2551` (Vision reads `image-short.png`'s three words).
+# `tests/worker_cli.rs:2556` (Vision reads `image-short.png`'s three words).
 case_ "image: text short of the threshold is not a page" \
   $I \
   's~            Some\(read\) if has_text_layer\(text_layer_chars\(&read\.text\)\) => \{~            Some(read) if !read.text.trim().is_empty() => {~' \
