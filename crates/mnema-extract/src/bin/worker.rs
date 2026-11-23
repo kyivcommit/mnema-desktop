@@ -19,9 +19,9 @@ use mnema_extract::manifest;
 use mnema_extract::typing::{PDF_MAGIC, Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, TEXT_SOURCE_NATIVE, XlsxError,
-    extract_docx, extract_epub, extract_html, extract_markdown, extract_pdf_pages, extract_text,
-    extract_xlsx, page_cap,
+    DocxError, EpubError, ImageError, ImageReadError, PdfError, PdfPage, TEXT_LAYER_MIN_CHARS,
+    TEXT_SOURCE_NATIVE, TEXT_SOURCE_OCR, XlsxError, extract_docx, extract_epub, extract_html,
+    extract_image_pages, extract_markdown, extract_pdf_pages, extract_text, extract_xlsx, page_cap,
 };
 use sha2::{Digest, Sha256};
 
@@ -518,8 +518,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
             frames
         }
         // Not "no reader yet" — the answer this branch gives for the other
-        // five. These bytes are not text at all, and no release adds a reader
-        // that makes them prose (D51).
+        // five. These bytes are not text at all (D51); a release that learns to
+        // read some of them (pictures, by OCR) releases their old rows with a
+        // migration (`RELEASE_NOT_TEXT`, mnema-index).
         Reader::NotText => {
             vec![refused_before_a_reader(
                 "not_text",
@@ -561,51 +562,7 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 // Filled in from the document below.
                 pages: 0,
             });
-            let on_page = |declared, page: mnema_extract::PdfPage| {
-                // Written before the first page and not before: a document
-                // none of whose pages has text answers `no_text_layer`
-                // *instead of* a header, and that is only known at the end.
-                if let Some(Frame::Header {
-                    sha256,
-                    mime,
-                    source_kind,
-                    reader,
-                    reader_version,
-                    ..
-                }) = header.take()
-                {
-                    emit(Frame::Header {
-                        sha256,
-                        mime,
-                        source_kind,
-                        reader,
-                        reader_version,
-                        // Every page the document declares: the ones that
-                        // arrive as Page frames plus the ones named by
-                        // `skipped_pages`. The pool checks exactly that sum,
-                        // and bounds the Page frames by it as they arrive.
-                        pages: declared,
-                    });
-                }
-                emit(Frame::Page {
-                    page_no: page.page_no,
-                    // A PDF page is not a section. `pages_of` gives this
-                    // reader `Coordinate::Page`, which is what a citation
-                    // into a PDF points at.
-                    section_title: None,
-                    // `None` for a native page: the Summary's `native:pdf`
-                    // stands for it, and a native page's frame stays the
-                    // bytes it was before OCR existed.
-                    text_source: page.ocr.map(|_| page.text_source.to_string()),
-                    ocr_confidence: page.ocr.map(|o| o.confidence),
-                    width_px: page.ocr.map(|o| o.width_px),
-                    height_px: page.ocr.map(|o| o.height_px),
-                    dpi: page.ocr.map(|o| o.dpi),
-                });
-                for block in page.blocks {
-                    emit(Frame::Block(block));
-                }
-            };
+            let on_page = |declared, page| emit_page(&mut header, emit, declared, page);
             // Pages without a text layer go to `--ocr` helpers of this same
             // binary when there is an engine to run and more than one core to
             // run it on (D196); otherwise they are read on this thread.
@@ -679,6 +636,67 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 // pages; the pool keeps none of them.
                 Err(PdfError::Ocr(e)) => vec![Frame::Failed {
                     message: format!("a page without a text layer could not be recognised: {e}"),
+                }],
+            }
+        }
+        // A picture: every frame read by OCR, a frame being a page, written
+        // the way a PDF's pages are (`emit_page`).
+        Reader::Image => {
+            let mut header = Some(Frame::Header {
+                sha256: sha256.clone(),
+                mime: file_type.mime.to_string(),
+                source_kind: file_type.source_kind,
+                // The constant, for the reason `READER_PDF` is one above:
+                // `pages_of` cites an image page by this exact string.
+                reader: manifest::READER_IMAGE.to_string(),
+                reader_version: manifest::IMAGE_READER_VERSION,
+                pages: 0,
+            });
+            let on_page = |declared, page| emit_page(&mut header, emit, declared, page);
+            // `not_text`, not `no_text_layer`: a picture with no text is what
+            // every photo was before this reader, and the folders tree hides
+            // `not_text` rather than marking each such photo as a scan that
+            // failed (`src-tauri/src/tree.rs`, `hides_the_file`). Both rules
+            // displace an old document once the bytes have changed.
+            let not_text = |sha256, reason| {
+                vec![reader_refused(
+                    manifest::READER_IMAGE,
+                    manifest::IMAGE_READER_VERSION,
+                    "not_text",
+                    reason,
+                    Some(sha256),
+                )]
+            };
+            match extract_image_pages(&bytes, on_page) {
+                Ok(_) if header.is_some() => not_text(
+                    sha256,
+                    format!(
+                        "this picture holds no text: nothing in it reads as \
+                         {TEXT_LAYER_MIN_CHARS} or more characters"
+                    ),
+                ),
+                Ok(skipped_pages) => vec![Frame::Summary {
+                    skipped_pages,
+                    text_source: TEXT_SOURCE_OCR.to_string(),
+                }],
+                // Off macOS: no decoder, so the answer a picture got before
+                // this reader — and a reason that does not claim it was looked at.
+                Err(ImageReadError::Image(e @ ImageError::Unsupported(_))) => {
+                    not_text(sha256, format!("this picture is not read here: {e}"))
+                }
+                // From the open, the cap or a frame mid-way: after a header,
+                // the stream ends here and the pool keeps none of it.
+                Err(ImageReadError::Image(e @ ImageError::Malformed(_))) => vec![reader_refused(
+                    manifest::READER_IMAGE,
+                    manifest::IMAGE_READER_VERSION,
+                    "malformed",
+                    e.to_string(),
+                    Some(sha256),
+                )],
+                // Never a refusal, as `PdfError::Ocr` above: a verdict about
+                // content would outlive the engine's repair (D57).
+                Err(ImageReadError::Ocr(e)) => vec![Frame::Failed {
+                    message: format!("a picture could not be recognised: {e}"),
                 }],
             }
         }
@@ -980,6 +998,59 @@ fn reader_refused(
         sha256,
         reader: Some(reader.to_string()),
         reader_version: Some(version),
+    }
+}
+
+/// Writes one page of a streaming reader (pdf, image): the header first, if
+/// it has not gone out yet, then the page and its blocks.
+///
+/// Written before the first page and not before: a document none of whose
+/// pages has text answers with a refusal *instead of* a header, and that is
+/// only known at the end.
+fn emit_page(
+    header: &mut Option<Frame>,
+    emit: &mut dyn FnMut(Frame),
+    declared: u32,
+    page: PdfPage,
+) {
+    if let Some(Frame::Header {
+        sha256,
+        mime,
+        source_kind,
+        reader,
+        reader_version,
+        ..
+    }) = header.take()
+    {
+        emit(Frame::Header {
+            sha256,
+            mime,
+            source_kind,
+            reader,
+            reader_version,
+            // Every page the document declares: the ones that arrive as Page
+            // frames plus the ones named by `skipped_pages`. The pool checks
+            // exactly that sum, and bounds the Page frames by it as they
+            // arrive.
+            pages: declared,
+        });
+    }
+    emit(Frame::Page {
+        page_no: page.page_no,
+        // A PDF page or an image frame is not a section. `pages_of` gives
+        // both readers `Coordinate::Page`, which is what a citation points at.
+        section_title: None,
+        // `None` for a native page: the Summary's `native:pdf` stands for
+        // it, and a native page's frame stays the bytes it was before OCR
+        // existed.
+        text_source: page.ocr.map(|_| page.text_source.to_string()),
+        ocr_confidence: page.ocr.map(|o| o.confidence),
+        width_px: page.ocr.map(|o| o.width_px),
+        height_px: page.ocr.map(|o| o.height_px),
+        dpi: page.ocr.map(|o| o.dpi),
+    });
+    for block in page.blocks {
+        emit(Frame::Block(block));
     }
 }
 

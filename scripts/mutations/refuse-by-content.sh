@@ -80,9 +80,18 @@ case_ "displaces: an interrupted UTF-16 note keeps the prose it still has" \
 
 # The worker reports its rule as a plain string because `mnema-extract` may not
 # link `mnema-index` (D26/D40), so nothing but a test compares the two spellings.
+#
+# Two producers of `not_text` since the image reader: bytes no reader claims
+# (`binary.bin`, the digest table's row) and a picture with no text (`solid.png`).
 case_ "wire: the worker spells not_text the way the pool reads it" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{"not_text",}{"nottext",}' \
+  's{"not_text",(\n\s+"this file is not text)}{"nottext",$1}' \
+  '"nottext",' \
+  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+
+case_ "wire: the image reader spells not_text the way the pool reads it" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{(manifest::IMAGE_READER_VERSION,\n\s+)"not_text",}{$1"nottext",}' \
   '"nottext",' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 
@@ -183,11 +192,19 @@ case_ "displaces: the digest comparison is not inverted" \
 # two classifier versions, which no test in one binary can stage.
 case_ "wire: the worker sends the digest it refused on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~("not_text",.*?)Some\(sha256\),~${1}None,~s' \
+  's~("not_text",\n\s+"this file is not text.*?)Some\(sha256\),~${1}None,~s' \
   '                None,
             )]
         }
         // Also refused' \
+  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+
+case_ "wire: the image reader sends the digest it refused on" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~(                    "not_text",\n\s+reason,\n\s+)Some\(sha256\),~${1}None,~' \
+  '"not_text",
+                    reason,
+                    None,' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 
 # …and the two branches beside it, which had nothing. The blindness was

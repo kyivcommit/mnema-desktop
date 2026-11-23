@@ -256,15 +256,15 @@ case_ "app: a stat that fails for another reason is reported as missing" \
 # A2c. No size gate: the worker reads a file of any size whole.
 case_ "app: a file over the PDF ceiling is handed to the worker" \
   $AP \
-  's~Ok\(meta\) if meta\.len\(\) > PoolConfig~Ok(meta) if false \&\& meta.len() > PoolConfig~' \
-  'Ok(meta) if false && meta.len()' \
+  's~Ok\(ceiling\) if meta\.len\(\) > ceiling =>~Ok(ceiling) if false \&\& meta.len() > ceiling =>~' \
+  'Ok(ceiling) if false && meta.len()' \
   mnema-desktop "${AT}a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker" --lib
 
 # A2d. The ceiling itself refused: off by one.
 case_ "app: a file exactly at the PDF ceiling is refused" \
   $AP \
-  's~Ok\(meta\) if meta\.len\(\) > PoolConfig~Ok(meta) if meta.len() >= PoolConfig~' \
-  'Ok(meta) if meta.len() >= PoolConfig' \
+  's~Ok\(ceiling\) if meta\.len\(\) > ceiling =>~Ok(ceiling) if meta.len() >= ceiling =>~' \
+  'Ok(ceiling) if meta.len() >= ceiling' \
   mnema-desktop "${AT}a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker" --lib
 
 # A3. A path that now names another document still sends the hash of the

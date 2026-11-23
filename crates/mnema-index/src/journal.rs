@@ -174,18 +174,25 @@ declare_skip_rules! {
     /// Its own rule rather than `Unsupported` for the reason `TooLarge` got
     /// one: the two answer the user differently. `Unsupported` says this
     /// product has no reader *yet* and the file waits for one; this says the
-    /// file is not the kind of thing this product reads, and no release will
-    /// change that. Someone asking "why is my file not found?" needs the two
-    /// apart.
+    /// file is not the kind of thing this product reads. Someone asking "why is
+    /// my file not found?" needs the two apart. "Not the kind" is a statement
+    /// about this build, not a promise: the image reader made pictures with text
+    /// readable, and those were `NotText` before it.
     ///
     /// Unlike `TooLarge`, whose lever back to re-examination is a *setting*
-    /// (`PoolConfig::max_bytes`), this rule's only lever is a constant:
-    /// `INDEX_FORMAT_VERSION` (`mnema_ingest::ingest_file`, the second cheap
-    /// arm). A file skipped `NotText` is never looked at again for the life
-    /// of the index unless that version moves — so any future loosening of
-    /// `classify` (the first candidate: UTF-16 without a byte-order
-    /// mark) must bump it, or the files it would now accept stay refused
-    /// forever.
+    /// (`PoolConfig::max_bytes`), this rule's levers are in the code: the
+    /// second cheap arm (`mnema_ingest::ingest_file`) answers a row from `stat`
+    /// while its `format_version` equals `INDEX_FORMAT_VERSION`, so a file
+    /// skipped `NotText` is never looked at again unless that version moves
+    /// **or** a migration ages this rule's rows (`RELEASE_NOT_TEXT`, migration
+    /// 11, did it for the image reader). A row that names its reader — a
+    /// picture without text, refused by `image` — has a third lever, that
+    /// reader's version (`the_reader_has_moved_on` in `mnema_ingest`); a row
+    /// from `classify` names none, so only the first two reach it. Any future loosening of `classify`
+    /// (the first candidate: UTF-16 without a byte-order mark) needs one of the
+    /// two, or the files it would now accept stay refused forever; the
+    /// migration is the cheaper one, since a bump releases every content rule
+    /// and moves the embedding space's identity (`INDEX_FORMAT_VERSION`).
     NotText,
     /// The file is text for its first bytes and binary after that — it *began*
     /// as text and stopped being one (D51). Decided by its own bytes, like

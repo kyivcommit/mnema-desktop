@@ -109,6 +109,27 @@ async function drawnAsHtml(m: string) {
 test('an HTML file is offered the choice, and its page is the HTML view', () => drawnAsHtml('text/html'));
 test('an EPUB is offered the choice, and its page is the HTML view', () => drawnAsHtml('application/epub+zip'));
 
+// Written out, not read from the set: the mimes the worker reports for a
+// picture (`typing.rs::image_mime`), each drawn as its page like a PDF.
+// One test, not `test.each`: the mutation harness checks case names literally.
+test('every picture mime is drawn as its page, with the choice; the text is its text view', async () => {
+  for (const m of ['image/jpeg', 'image/png', 'image/tiff', 'image/webp', 'image/heic']) {
+    mime = m;
+    stubStorage();
+    invoke.mockClear();
+    const { unmount } = render(Launcher);
+    await openFile();
+    expect(await screen.findByTestId('page-image', {}, { timeout: 500 }).catch(() => null), m).not.toBeNull();
+    expect(pressed('page'), m).toBe('true');
+    expect(screen.queryByTestId('file-block'), m).toBeNull();
+    expect(invoke.mock.calls.some(([c]) => c === 'render_doc'), m).toBe(false);
+    await fireEvent.click(screen.getByTestId('pdf-view-text'));
+    expect(await screen.findByTestId('file-block'), m).toBeTruthy();
+    expect(screen.queryByTestId('page-image'), m).toBeNull();
+    unmount();
+  }
+});
+
 test('the choice is not offered for anything but a PDF or Markdown', async () => {
   mime = 'text/plain';
   render(Launcher);

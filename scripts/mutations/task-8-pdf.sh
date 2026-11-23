@@ -192,7 +192,7 @@ case_ "reader: a skipped page is named, not silently dropped" \
 # first page instead, which is the streaming shape of "only the pages sent".
 case_ "worker: the header counts every page the document declares" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                        pages: declared,}{                        pages: page.page_no,}' \
+  's{            pages: declared,}{            pages: page.page_no,}' \
   'pages: page.page_no,' \
   mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 

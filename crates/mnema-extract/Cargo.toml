@@ -138,12 +138,16 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "CFData",
+    "CFNumber",
+    "CFString",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
     "CGImage",
     "CGDataProvider",
     "CGColorSpace",
+    "CGContext",
+    "CGBitmapContext",
 ] }
 objc2-vision = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -154,6 +158,15 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNRequestHandler",
     "VNObservation",
     "VNTypes",
+] }
+
+# ImageIO for pictures (`src/image.rs`): it opens every format the OS reads and
+# hands frames to the redraw that feeds the same Vision request.
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGImageSource",
+    "CGImageProperties",
+    "objc2-core-graphics",
 ] }
 
 [dev-dependencies]

@@ -263,6 +263,45 @@ done
     path
 }
 
+/// A worker that reads every file as a **picture**: the header names the image
+/// reader at this build's version, and every page is a frame read by OCR
+/// (`ocr:vision`, with a confidence and a bitmap), one per non-empty line —
+/// several lines being a multi-frame TIFF. Vision is not in this loop: the frames
+/// are the shape `worker.rs`'s `Reader::Image` arm sends, and what the parent does
+/// with them is what this harness judges.
+#[cfg(unix)]
+fn image_reader_worker(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("image-reader");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+while read -r line; do
+  file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+  sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
+  pages=$(grep -c . "$file")
+  printf '{"frame":"header","sha256":"%s","mime":"image/png","source_kind":"document","reader":"image","reader_version":1,"pages":%s}
+' "$sha" "$pages"
+  n=0
+  while IFS= read -r raw; do
+    [ -z "$raw" ] && continue
+    text=$(printf '%s' "$raw" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    n=$((n+1))
+    printf '{"frame":"page","page_no":%s,"section_title":null,"text_source":"ocr:vision","ocr_confidence":0.9,"width_px":2480,"height_px":3508,"dpi":300}
+' "$n"
+    printf '{"frame":"block","block_type":"paragraph","reading_order":0,"language":null,"text":"%s","line_start":null,"line_end":null}
+' "$text"
+  done < "$file"
+  printf '{"frame":"summary","skipped_pages":[],"text_source":"ocr:vision"}
+'
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 /// A worker that refuses every file under `rule` and **names the reader that
 /// refused it** — the shape a reader-made refusal has had since `Frame::Refused`
 /// grew `reader` and `reader_version`. `stricter_worker` above is the older
@@ -1567,14 +1606,16 @@ impl World {
         }
     }
 
-    /// A photo — the same synthetic solid-colour PNG the deterministic tests
-    /// use, invented outright by `make_fixtures.py`. Its first NUL sits at
-    /// offset 8, well inside the head window, so it is binary from the start.
+    /// A database file's opening — `binary.bin`, invented outright by
+    /// `make_fixtures.py`. Its first NUL sits at offset 15, well inside the
+    /// head window, so it is binary from the start, and no reader claims it by
+    /// its magic. (It was the solid-colour PNG until the image reader: a
+    /// picture is now read for its text, which would put Vision in this loop.)
     ///
     /// No markers: nothing here is ever indexed, and that is the point.
     fn not_text_body(&self) -> Content {
         Content {
-            bytes: include_bytes!("../../mnema-extract/tests/fixtures/solid.png").to_vec(),
+            bytes: include_bytes!("../../mnema-extract/tests/fixtures/binary.bin").to_vec(),
             markers: Vec::new(),
             shape: Shape::NotText,
         }
@@ -2143,6 +2184,7 @@ impl World {
         self.check_checkpoints_agree(&documents);
         self.check_citations_locate();
         self.check_a_page_keeps_its_own_source();
+        self.check_a_picture_cites_its_frame();
     }
 
     /// The call in flight was refused by a newer release of the reader that
@@ -3258,6 +3300,53 @@ impl World {
         }
     }
 
+    /// **8. A picture's chunk cites the frame it came from.**
+    ///
+    /// A document whose pages are `ocr:vision` frames — only
+    /// `image_reader_worker` writes those here — is cited by page, and the page
+    /// it names is one the document has. A chunk cited by line numbers, or by
+    /// no coordinate at all, points at nothing a picture has, and the viewer
+    /// would open no frame.
+    fn check_a_picture_cites_its_frame(&self) {
+        let chunks: Vec<(i64, String)> = self
+            .db
+            .conn()
+            .prepare(
+                "SELECT id, document_id FROM chunk
+                  WHERE document_id IN
+                        (SELECT document_id FROM page WHERE text_source = 'ocr:vision')",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (id, document) in chunks {
+            let Some(citation) = self.db.citation(id).unwrap() else {
+                self.fail(format!(
+                    "invariant 8 — chunk {id} of a picture has no citation"
+                ));
+            };
+            let mnema_core::Coordinate::Page { number } = citation.coordinate else {
+                self.fail(format!(
+                    "invariant 8 — chunk {id} of picture {document} cites {:?}, not a \
+                     page: the viewer has no frame to open",
+                    citation.coordinate
+                ));
+            };
+            let pages = self.count(&format!(
+                "SELECT count(*) FROM page WHERE document_id = '{document}' AND page_no = {number}"
+            ));
+            if pages != 1 {
+                self.fail(format!(
+                    "invariant 8 — chunk {id} of picture {document} cites page {number}, \
+                     which the document does not have"
+                ));
+            }
+            self.count_once("8: a picture's chunk cited its frame");
+        }
+    }
+
     /// **5. The two checkpoints never disagree.**
     ///
     /// `ingest_stage` says whether the chunking finished; `document.status`
@@ -4360,6 +4449,27 @@ impl World {
         }
     }
 
+    /// **A photo of pages**: a picture with text, read by the image reader —
+    /// one frame per line, so up to three is a multi-frame TIFF. A fresh file,
+    /// so the document is the image reader's own; a later walk that finds the
+    /// same bytes keeps it as it is.
+    fn a_picture_is_read(&mut self) {
+        #[cfg(unix)]
+        {
+            let n = self.next_counter();
+            let relative = format!("docs/photo-{n}.png");
+            let units = 1 + (n % 3) as usize;
+            let content = self.text_body(units);
+            let at = self.next_tick();
+            self.note(format!(
+                "  create {relative} ({units} frames) for the image reader"
+            ));
+            self.write_at(&relative, content, at);
+            let image = image_reader_worker(self.dir.path());
+            self.ingest_with(&relative, PoolConfig::new(&image), " [image reader]");
+        }
+    }
+
     /// **A newer reader finds no text layer in bytes an older one indexed** —
     /// D186's case, and the only state in which a refusal on byte-identical
     /// content takes a document away (`displaces`' `NoTextLayer` arm).
@@ -5192,6 +5302,20 @@ fn run(seed: u64, steps: usize) -> Reached {
         world.step(n);
     }
     world.settle();
+    // **Pictures after the first settle, not among the steps.** Any change to
+    // the steps — a slot in the draw table, a picture every eighth step — moves
+    // the corpus every older mutation case was measured against: the first
+    // lost docx and xlsx, the second the page-row clean-up `task-14.sh` C1
+    // needs. So the forty steps and their settle stay as they were, and the
+    // pictures get eight steps of their own, mixed with drawn operations, and a
+    // second settle.
+    for n in steps + 1..=steps + 8 {
+        if n % 2 == 1 {
+            world.a_picture_is_read();
+        }
+        world.step(n);
+    }
+    world.settle();
     world.reached.counts = world.fired.take();
     world.reached
 }
@@ -5366,10 +5490,11 @@ fn random_sequences_do_not_lose_data() {
     .into_iter()
     .collect();
     let want_shapes: BTreeSet<&str> = Shape::EVERY_LABEL.into_iter().collect();
-    let want_readers: BTreeSet<String> = ["text", "markdown", "html", "epub", "docx", "xlsx"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let want_readers: BTreeSet<String> =
+        ["text", "markdown", "html", "epub", "docx", "xlsx", "image"]
+            .into_iter()
+            .map(String::from)
+            .collect();
     let want_rules: BTreeSet<&str> = EVERY_RULE
         .into_iter()
         .filter(|rule| must_the_corpus_reach(*rule))
@@ -5424,6 +5549,7 @@ fn random_sequences_do_not_lose_data() {
         "3f re-ask: journal row older than today's reader",
         "3f answer: journal row at today's reader",
         "7: an OCR page kept its own source",
+        "8: a picture's chunk cited its frame",
     ]
     .into_iter()
     .chain(NO_TEXT_CASES)

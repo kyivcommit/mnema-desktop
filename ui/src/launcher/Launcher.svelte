@@ -12,6 +12,7 @@
   import type { TreePick, TreeSelection } from './Tree.svelte';
   import FilePane from './FilePane.svelte';
   import { DOC_PAGE_MIMES } from './DocPage.svelte';
+  import { PICTURE_PAGE_MIMES } from './PdfPage.svelte';
   import Recents from './Recents.svelte';
   import Shell from './Shell.svelte';
   import { loadLayout, type PanelState } from './layout';
@@ -43,11 +44,11 @@
   // The open file's path from its root, reported by the pane and drawn in the
   // right panel's head.
   let fileTitle = $state<string | null>(null);
-  // The open document's type, reported by the pane: a PDF, or a file drawn as
-  // HTML (Markdown, HTML, EPUB), offers the choice of its page or its text;
-  // anything else, only text.
+  // The open document's type, reported by the pane: a PDF or a picture, or a
+  // file drawn as HTML (Markdown, HTML, EPUB), offers the choice of its page or
+  // its text; anything else, only text.
   let fileMime = $state<string | null>(null);
-  const PAGE_MIMES = new Set(['application/pdf', ...DOC_PAGE_MIMES]);
+  const PAGE_MIMES = new Set([...PICTURE_PAGE_MIMES, ...DOC_PAGE_MIMES]);
   // Remembered in the webview's own storage — a convenience, so a storage that
   // is missing, refuses, or holds something else is the default, the page.
   const PDF_VIEW_KEY = 'mnema.pdfView';

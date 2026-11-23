@@ -75,7 +75,7 @@
   import { locale, t } from '../i18n';
   import { openDocument } from '../lib/ipc';
   import DocPage, { DOC_PAGE_MIMES } from './DocPage.svelte';
-  import PdfPage from './PdfPage.svelte';
+  import PdfPage, { PICTURE_PAGE_MIMES } from './PdfPage.svelte';
   import { scrollWithin } from '../lib/scroll';
   import type { DocumentFocus, DocumentLocation, DocumentView, Freshness } from '../lib/ipc';
 
@@ -270,7 +270,7 @@
     <p data-testid="file-loading">{loadingLabel}</p>
   {:else if view.kind === 'unavailable'}
     <p role="status" data-testid="file-unavailable">{unavailableText(view.reason)}</p>
-  {:else if mode === 'page' && view.mime === 'application/pdf'}
+  {:else if mode === 'page' && PICTURE_PAGE_MIMES.has(view.mime)}
     <!-- The page mode opens page 1 when the cited passage is gone; without
          this line a person would take page 1 for the citation. -->
     {#if focusGone}

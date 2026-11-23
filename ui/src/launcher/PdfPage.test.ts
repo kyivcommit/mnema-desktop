@@ -480,6 +480,24 @@ test('a drawn page\'s sheet has the page\'s own shape, so the boxes land on its 
   expect(sheet(2).style.aspectRatio).toBe('900 / 600');
 });
 
+// A photo is one page; its frame can be narrower than the width asked, and the
+// sheet takes the frame's shape from the answer, not from the request.
+test('a picture of one page draws one page, shaped by the frame it answers', async () => {
+  view = pdf({
+    mime: 'image/jpeg',
+    blocks: [{ blockId: 10, kind: 'paragraph', text: 'Текст на фото.', pageNo: 1, sectionTitle: null }],
+  });
+  renderReply = () => Promise.resolve(page({ pages: 1, widthPx: 400, heightPx: 300 }));
+  mount();
+  await waitFor(() => expect(imageOf(1)).not.toBeNull());
+  await settle();
+  expect(screen.getAllByTestId('page-slot')).toHaveLength(1);
+  expect(screen.getByTestId('page-of').textContent).toBe('page 1 of 1');
+  expect(asked().every((n) => n === 1)).toBe(true);
+  expect(renderCalls().every((c) => (c.widthPx as number) > 400)).toBe(true);
+  expect(slot(1).querySelector<HTMLElement>('[data-testid="page-sheet"]')!.style.aspectRatio).toBe('400 / 300');
+});
+
 test('a whole-document failure clears once the window coming back finds the file again', async () => {
   view = book(3);
   renderReply = () => Promise.resolve({ kind: 'unavailable', reason: 'fileMissing' });

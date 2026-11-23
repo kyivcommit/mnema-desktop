@@ -5,6 +5,9 @@
 //! when the page's text, read again now, hashes to what the offsets were counted
 //! in. A page that changed under the index gets its image and no boxes: a
 //! highlight on the wrong words is worse than none.
+//!
+//! A picture (the image reader's magic) is a page per frame: the frame indexing
+//! decoded is recognised again and shown, scaled down, from that one bitmap.
 
 use std::fmt::Write as _;
 
@@ -15,10 +18,11 @@ use mnema_core::render::{
 use pdfium_render::prelude::{PdfBitmapFormat, PdfPage, PdfPoints, PdfRenderConfig};
 use sha2::{Digest, Sha256};
 
-use crate::ocr::{Boxed, recognise_ranges};
+use crate::image::{ImageError, open as open_image};
+use crate::ocr::{Boxed, OwnedPageImage, PageImage, recognise_ranges};
 use crate::pdf::render_for_ocr;
 use crate::pdfium_probe::{lock_pdfium, mapped_page_text, pdfium};
-use crate::typing::PDF_MAGIC;
+use crate::typing::{PDF_MAGIC, Reader, identify};
 
 /// The widest image one request may ask for. The window shows a page a few
 /// hundred points wide; past this the PNG only costs encode time and memory.
@@ -45,6 +49,9 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
         Err(e) => return refused(RenderError::Unreadable, format!("{}: {e}", req.path)),
     };
     if !bytes.starts_with(PDF_MAGIC) {
+        if identify(&bytes, None).reader == Reader::Image {
+            return render_picture(&bytes, req);
+        }
         return refused(RenderError::NotPdf, format!("{} is not a PDF", req.path));
     }
     let pdfium = match pdfium() {
@@ -127,6 +134,87 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
     }
 }
 
+/// Frame `page_no` of a picture. The boxes and the PNG come from one bitmap,
+/// the one [`crate::extract_image_pages`] recognised (same `open`, same
+/// `frame`): the PNG is that bitmap scaled down, and the boxes are fractions,
+/// so they fit it at any scale.
+fn render_picture(bytes: &[u8], req: &RenderRequest) -> RenderReply {
+    let frames = match open_image(bytes) {
+        Ok(frames) => frames,
+        // No decoder on this platform: the reply pictures had before they had
+        // a page view, and not a fact about the file (D57).
+        Err(ImageError::Unsupported(e)) => return refused(RenderError::NotPdf, e),
+        Err(e) => return refused(RenderError::Unreadable, e.to_string()),
+    };
+    let count = frames.count() as u32;
+    if !(1..=count).contains(&req.page_no) {
+        return refused(
+            RenderError::NoSuchPage,
+            format!("page {} of {count}", req.page_no),
+        );
+    }
+    let image = match frames.frame(req.page_no as usize - 1) {
+        Ok(image) => image,
+        Err(e) => return refused(RenderError::Unreadable, e.to_string()),
+    };
+    let (rgba, w, h) = shown(&image, req.width_px);
+    let png = match encode_png(&rgba, w, h) {
+        Ok(png) => png,
+        Err(e) => return refused(RenderError::Unreadable, format!("PNG: {e}")),
+    };
+    // No text layer to read without `recognise`: as a scan page asked so.
+    let (text, rects) = if !req.recognise {
+        (TextMatch::None, Vec::new())
+    } else {
+        recognised_on(&image.as_image(), req)
+    };
+    RenderReply::Rendered {
+        pages: count,
+        width_px: w,
+        height_px: h,
+        png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        text,
+        rects,
+    }
+}
+
+// A frame's long side is capped for OCR under the height cap, so `shown` needs none.
+const _: () = assert!(crate::OCR_MAX_SIDE_PX as u32 <= MAX_HEIGHT_PX);
+
+/// `image` as RGBA, scaled down -- never up -- to `width_px`, keeping its
+/// shape; each pixel shown is the mean of the box it covers. `image` is
+/// opaque (drawn onto white), so premultiplied BGRA is plain BGRA.
+fn shown(image: &OwnedPageImage, width_px: u32) -> (Vec<u8>, u32, u32) {
+    let (sw, sh) = (u64::from(image.width), u64::from(image.height));
+    let (mut w, mut h) = (sw, sh);
+    let target = u64::from(width_px.clamp(1, MAX_WIDTH_PX));
+    if w > target {
+        h = (h * target / w).max(1);
+        w = target;
+    }
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for oy in 0..h {
+        let (y0, y1) = (oy * sh / h, ((oy + 1) * sh / h).max(oy * sh / h + 1));
+        for ox in 0..w {
+            let (x0, x1) = (ox * sw / w, ((ox + 1) * sw / w).max(ox * sw / w + 1));
+            let mut sum = [0u64; 4];
+            for y in y0..y1 {
+                let row = &image.bgra[y as usize * image.stride..];
+                for x in x0..x1 {
+                    let px = &row[x as usize * 4..x as usize * 4 + 4];
+                    for (s, v) in sum.iter_mut().zip(px) {
+                        *s += u64::from(*v);
+                    }
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            let [b, g, r, a] = sum.map(|s| (s / n) as u8);
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    (rgba, w as u32, h as u32)
+}
+
 fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, png::EncodingError> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, w, h);
@@ -154,7 +242,13 @@ fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch,
             return (TextMatch::Unplaced, Vec::new());
         }
     };
-    let boxed = match recognise_ranges(&image.as_image(), &req.ranges) {
+    recognised_on(&image.as_image(), req)
+}
+
+/// The boxes of `req`'s ranges on `image`, recognised by the call indexing
+/// used, judged against the text indexing stored.
+fn recognised_on(image: &PageImage, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
+    let boxed = match recognise_ranges(image, &req.ranges) {
         Ok(Some(boxed)) => boxed,
         Ok(None) => {
             eprintln!("mnema-extract-worker: no OCR engine on this platform");
@@ -352,6 +446,54 @@ mod tests {
             text: text.to_string(),
             ranges,
         }
+    }
+
+    #[test]
+    fn a_picture_is_shown_as_rgba_and_scaled_down_by_its_mean_never_up() {
+        // Two BGRA pixels in one row, with a stride wider than the row.
+        let image = OwnedPageImage {
+            bgra: vec![10, 20, 30, 255, 30, 40, 50, 255, 0, 0, 0, 0],
+            width: 2,
+            height: 1,
+            stride: 12,
+            dpi: 72,
+        };
+        assert_eq!(shown(&image, 1), (vec![40, 30, 20, 255], 1, 1));
+        let unscaled = (vec![30, 20, 10, 255, 50, 40, 30, 255], 2, 1);
+        assert_eq!(shown(&image, 2), unscaled);
+        assert_eq!(shown(&image, 500), unscaled);
+    }
+
+    /// The mean is over the box's rows too, not its first row: a thin
+    /// horizontal stroke would otherwise vanish when 4000 px become 800.
+    #[test]
+    fn a_picture_scaled_down_averages_every_row_it_covers() {
+        let image = OwnedPageImage {
+            bgra: vec![
+                0, 0, 0, 255, 0, 0, 0, 255, 200, 100, 40, 255, 200, 100, 40, 255,
+            ],
+            width: 2,
+            height: 2,
+            stride: 8,
+            dpi: 72,
+        };
+        assert_eq!(shown(&image, 1), (vec![20, 50, 100, 255], 1, 1));
+    }
+
+    /// The worker's own ceiling, not the caller's: a request past it gets
+    /// `MAX_WIDTH_PX`, as a PDF page does.
+    #[test]
+    fn a_picture_wider_than_the_ceiling_is_shown_at_the_ceiling() {
+        let width = MAX_WIDTH_PX + 1;
+        let image = OwnedPageImage {
+            bgra: vec![255; width as usize * 4],
+            width,
+            height: 1,
+            stride: width as usize * 4,
+            dpi: 72,
+        };
+        let (_, w, h) = shown(&image, MAX_WIDTH_PX + 2000);
+        assert_eq!((w, h), (MAX_WIDTH_PX, 1));
     }
 
     #[test]

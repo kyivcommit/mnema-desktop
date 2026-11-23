@@ -3012,12 +3012,12 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
 fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
     let fx = Fixture::new();
     fx.place_at(
-        "photos/scan.png",
-        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        "data/archive.sqlite",
+        include_bytes!("../../mnema-extract/tests/fixtures/binary.bin"),
         mtime(),
     );
     assert_eq!(
-        fx.ingest("photos/scan.png"),
+        fx.ingest("data/archive.sqlite"),
         Ingested::Skipped {
             rule: SkipRule::NotText
         }
@@ -3032,13 +3032,13 @@ fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
         .execute(
             "UPDATE skipped SET format_version = format_version - 1
               WHERE watched_root_id = ?1 AND relative_path = ?2",
-            (fx.root_id, "photos/scan.png"),
+            (fx.root_id, "data/archive.sqlite"),
         )
         .unwrap();
 
     let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
     assert_eq!(
-        fx.ingest_with_worker("photos/scan.png", &broken),
+        fx.ingest_with_worker("data/archive.sqlite", &broken),
         Ingested::Skipped {
             rule: SkipRule::Crash
         },
@@ -3076,8 +3076,10 @@ fn a_text_file_overwritten_by_a_photo_stops_answering() {
         include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
         mtime_just_after(),
     );
+    // A picture now goes to Vision, whose first call from a fresh worker
+    // binary can take ~46 s — past the default deadline here.
     assert_eq!(
-        fx.ingest("notes/kropyva.txt"),
+        fx.ingest_with_timeout("notes/kropyva.txt", OCR_TIMEOUT),
         Ingested::Skipped {
             rule: SkipRule::NotText
         }
@@ -3285,9 +3287,10 @@ fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
 /// `Unsupported` is the *least* stable verdict this product gives: the worker's
 /// own words for it are "no reader implemented yet"
 /// (`crates/mnema-extract/src/bin/worker.rs`), which is exactly what a release
-/// changes — where `NotText` promises the opposite, that "no release adds a
-/// reader that makes them prose". Task 10 made the stable rule conditional on
-/// the digest and left the unstable one deleting outright.
+/// changes — where `NotText` says the bytes are not text at all, a verdict a
+/// release reversed once (pictures) and by a migration. Task 10 made the
+/// stable rule conditional on the digest and left the unstable one deleting
+/// outright.
 ///
 /// What that costs is one document per file, silently: a folder indexed by a
 /// build that has a reader, walked once by a build that does not — a rollback,
@@ -6090,7 +6093,9 @@ const SCAN_UK: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/scan-u
 
 /// Vision's cold start is measured in tens of seconds (Task 8 gave the pool
 /// 300 s for it); the fixture's 10 s would time a correct read out.
-#[cfg(target_os = "macos")]
+///
+/// On every platform: a picture goes to the image reader everywhere, and a
+/// test about one runs off macOS too, where the answer is `not_text`.
 const OCR_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `(page_no, text_source, ocr_confidence, width_px, height_px, dpi)` of every
@@ -6290,6 +6295,202 @@ fn a_whole_scan_v3_refused_is_indexed_by_v4_and_its_journal_row_goes() {
         vec!["ocr:vision"]
     );
     assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+}
+
+// ------------------------------------------------- pictures read by Vision
+
+#[cfg(target_os = "macos")]
+const IMAGE_UK_PNG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-uk.png");
+#[cfg(target_os = "macos")]
+const IMAGE_UK_JPG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-uk.jpg");
+#[cfg(target_os = "macos")]
+const IMAGE_BLANK_JPG: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/image-blank.jpg");
+
+/// The whole-file journal rules for `path`, page rows left out.
+#[cfg(target_os = "macos")]
+fn whole_file_skip_rules(fx: &Fixture, path: &str) -> Vec<String> {
+    fx.db
+        .skips_for_root(fx.root_id)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.relative_path == path && r.page_no.is_none())
+        .map(|r| r.rule)
+        .collect()
+}
+
+/// Spec «Що зникне» 2, the half `a_text_file_overwritten_by_a_photo_stops_answering`
+/// cannot reach: the picture that replaces the note *has* text. There the old
+/// document goes through a refusal (`record_skip`); here through an indexing
+/// (`repoint`), and the new one is a picture's — one page, cited by page, what
+/// OCR knew on its row. A build that refused every picture passes that test and
+/// fails this one; so does one citing a picture by lines, which is `None`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_text_file_overwritten_by_a_picture_with_text_answers_with_the_picture() {
+    let fx = Fixture::new();
+    let path = "notes/kropyva.txt";
+    fx.place_at(path, "кропива росте попід тином\n".as_bytes(), mtime());
+    assert!(matches!(fx.ingest(path), Ingested::Indexed { .. }));
+    assert!(
+        !fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at(path, IMAGE_UK_PNG, mtime_just_after());
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+
+    assert!(
+        fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+    let entry = fx.db.path_entry(fx.root_id, path).unwrap().unwrap();
+    assert_eq!((entry.reader.as_str(), entry.reader_version), ("image", 1));
+    let mime: String = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT mime FROM document WHERE id = ?1",
+            [&entry.document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mime, "image/png");
+
+    let rows = page_rows(&fx, path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (page_no, source, confidence, width, height, _dpi) = rows[0].clone();
+    assert_eq!((page_no, source.as_str()), (1, "ocr:vision"), "{rows:?}");
+    assert!(
+        confidence.is_some_and(|c| (0.0..=1.0).contains(&c)),
+        "{rows:?}"
+    );
+    assert!(
+        width.is_some_and(|w| w > 0) && height.is_some_and(|h| h > 0),
+        "{rows:?}"
+    );
+    for word in ["їжак", "єнот", "бібліотеки", "collegium"] {
+        assert_eq!(
+            coordinate_of(&fx, word),
+            Coordinate::Page { number: 1 },
+            "{word}"
+        );
+    }
+}
+
+/// Spec «Що зникне» 1, both ways, under one camera name. A photo with text is
+/// overwritten by one without (a camera reset reusing `IMG_0001.jpg`): the
+/// picture's own reader refuses it, the same reader that made the document,
+/// and the document must still go — `a_text_file_overwritten_by_a_photo_stops_answering`
+/// has a `text` document refused by `image`, so a rule keeping the document
+/// when its own reader refused would pass there. Then back: the journal row
+/// the refusal left must go when the path is indexed again, or the window
+/// would say a searchable file has no text.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_photo_losing_its_text_and_regaining_it_leaves_and_rejoins_the_index() {
+    let fx = Fixture::new();
+    let path = "camera/IMG_0001.jpg";
+    fx.place_at(path, IMAGE_UK_JPG, mtime());
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("їжак", 10).unwrap().is_empty(),
+        "the premise fails if the photo's text was never searchable"
+    );
+
+    fx.place_at(path, IMAGE_BLANK_JPG, mtime_just_after());
+    assert_eq!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_none());
+    assert!(
+        fx.db.search_lexical("їжак", 10).unwrap().is_empty(),
+        "the old photo's text still answers for a photo without any"
+    );
+    assert_eq!(whole_file_skip_rules(&fx, path), vec!["not_text"]);
+
+    fx.place_at(
+        path,
+        IMAGE_UK_JPG,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_some());
+    assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+    assert!(
+        whole_file_skip_rules(&fx, path).is_empty(),
+        "an indexed photo has no journal row saying it has no text"
+    );
+}
+
+/// A photo with text that a build before the image reader refused as
+/// `not_text` reaches the reader once the index is migrated (migration 11),
+/// and not before: at the version that build stamped, the second cheap arm
+/// answers from `stat` and the real worker — which would index it — is never
+/// asked. Both halves, so the test tells the aged row from the current one.
+///
+/// The old build's row is `record_skip` exactly as its worker sent it: a
+/// refusal before a reader was chosen, so no reader named. Its index is the
+/// same file at `user_version` 10 — migration 11 changes rows, not DDL — and
+/// reopening it runs the real migration.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_photo_an_older_build_refused_as_not_text_is_read_after_the_migration() {
+    let mut fx = Fixture::new();
+    let path = "camera/IMG_0002.jpg";
+    let on_disk = fx.place_at(path, IMAGE_UK_JPG, mtime());
+    fx.db
+        .record_skip(
+            fx.root_id,
+            path,
+            None,
+            "not text",
+            SkipRule::NotText,
+            mnema_walk::stat(&on_disk),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        },
+        "the control: a current-version row must answer without a worker"
+    );
+    assert!(fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+
+    fx.db
+        .conn()
+        .execute_batch("PRAGMA user_version = 10")
+        .unwrap();
+    fx.db = open(&fx.index_path).unwrap();
+    assert_eq!(
+        whole_file_skip_rules(&fx, path),
+        vec!["not_text"],
+        "the migration keeps the row, so the tree keeps the photo hidden"
+    );
+
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+    assert!(
+        whole_file_skip_rules(&fx, path).is_empty(),
+        "an indexed photo has no journal row saying it has no text"
+    );
 }
 
 /// `too_large` under `pdf_max_bytes` is a fact about the setting, not the file

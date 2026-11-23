@@ -182,10 +182,10 @@ case_ "window: a slow answer for an older draw paints over the newer one" \
   src/launcher/DocPage.test.ts 'a slow answer for an older draw does not paint over the newer one' runner=vitest
 
 # W2. A Markdown file is not offered its page.
-case_ "window: the choice is offered for a PDF only" \
+case_ "window: the choice is offered for a PDF or a picture only" \
   $LA \
-  's~\Qnew Set(['"'"'application/pdf'"'"', ...DOC_PAGE_MIMES])\E~new Set(['"'"'application/pdf'"'"'])~' \
-  "new Set(['application/pdf'])" \
+  's~\Qnew Set([...PICTURE_PAGE_MIMES, ...DOC_PAGE_MIMES])\E~new Set([...PICTURE_PAGE_MIMES])~' \
+  "new Set([...PICTURE_PAGE_MIMES])" \
   src/launcher/LauncherPdf.test.ts 'a Markdown file is offered the choice too, and its page is the HTML view' runner=vitest
 
 # ── Placing a citation in code (review, PR #95) ──────────────────────────────

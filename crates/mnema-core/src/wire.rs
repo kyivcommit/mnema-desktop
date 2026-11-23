@@ -284,6 +284,11 @@ pub struct Request {
     pub pdf_max_bytes: u64,
 }
 
+/// The first bytes of a PDF: which of [`Request`]'s two ceilings holds a file
+/// is decided by these, never by its name. Here, not in the extractor, because
+/// the application holds a file it hands the worker to the same rule.
+pub const PDF_MAGIC: &[u8] = b"%PDF-";
+
 /// The shape `Request` is read from. serde's `default` cannot see a sibling
 /// field, so the absent-means-`max_bytes` rule lives in the `From` below.
 #[derive(Deserialize)]

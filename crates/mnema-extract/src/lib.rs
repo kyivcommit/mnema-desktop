@@ -18,6 +18,7 @@ mod doc_view;
 mod docx;
 mod epub;
 mod html;
+mod image;
 pub mod manifest;
 mod markdown;
 mod ocr;
@@ -56,6 +57,8 @@ pub use doc_view::render_doc;
 pub use docx::{DocxError, DocxSection, extract_docx};
 pub use epub::{BOOK_MAX_BYTES, EpubBook, EpubChapter, EpubError, extract_epub};
 pub use html::{HtmlPage, extract_html};
+// `open` alone would read as opening anything at the crate root.
+pub use image::{Frames, ImageError, ImageReadError, extract_image_pages, open as open_image};
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
 pub use ocr::{
     Boxed, OCR_UNAVAILABLE_ENV, OcrError, OwnedPageImage, PageImage, Recognised, recognise,
